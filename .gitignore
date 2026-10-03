@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.env*
+.DS_Store
+# working notes and raw Kaggle downloads (every reply is in results/kaggle_cli/kaggle_raw.jsonl)
+PROGRESS.md
+docs/post-outline.md
+results/kaggle_cli/raw/

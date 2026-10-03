@@ -1,0 +1,28 @@
+probe: 24 models x 6 items x 2 conditions; 288 calls to make
+key: NEBIUS_API_KEY (len=235); endpoint host pinned and https verified
+ledger: $0.0873 already spent; cap $4.00 total, $0.60 per model
+deepseek-ai/DeepSeek-V4-Pro: 12 tasks -> ok 12, truncated 0, error 0 in 5s; model spend $0.0080, total $0.1191
+google/gemma-3-27b-it: 12 tasks -> ok 12, truncated 0, error 0 in 5s; model spend $0.0155, total $0.1210
+deepseek-ai/DeepSeek-V4-Flash-0731: 12 tasks -> ok 12, truncated 0, error 0 in 5s; model spend $0.0009, total $0.1219
+Qwen/Qwen3.8-27B: 12 tasks -> ok 12, truncated 0, error 0 in 6s; model spend $0.0098, total $0.1294
+Qwen/Qwen3-235B-A22B-Instruct-2507: 12 tasks -> ok 12, truncated 0, error 0 in 6s; model spend $0.0010, total $0.1372
+NousResearch/Hermes-4-405B: 12 tasks -> ok 12, truncated 0, error 0 in 6s; model spend $0.0051, total $0.1409
+deepseek-ai/DeepSeek-V4.1-Flash: 12 tasks -> ok 12, truncated 0, error 0 in 7s; model spend $0.0034, total $0.1587
+deepseek-ai/DeepSeek-V4-Pro-0813: 12 tasks -> ok 12, truncated 0, error 0 in 8s; model spend $0.0128, total $0.1672
+moonshotai/Kimi-K3: 12 tasks -> ok 12, truncated 0, error 0 in 3s; model spend $0.0385, total $0.1965
+Qwen/Qwen3-30B-A3B-Instruct-2507: 12 tasks -> ok 12, truncated 0, error 0 in 8s; model spend $0.0152, total $0.1981
+nvidia/Nemotron-3-Ultra-550b-a55b: 12 tasks -> ok 12, truncated 0, error 0 in 3s; model spend $0.0109, total $0.2136
+openbmb/MiniCPM-V-4_5: 12 tasks -> ok 12, truncated 0, error 0 in 1s; model spend $0.0030, total $0.2145
+MiniMaxAI/MiniMax-M3: 12 tasks -> ok 11, truncated 1, error 0 in 9s; model spend $0.0068, total $0.2182
+moonshotai/Kimi-K2.6: 12 tasks -> ok 12, truncated 0, error 0 in 10s; model spend $0.0243, total $0.2378
+openai/gpt-oss-120b: 12 tasks -> ok 12, truncated 0, error 0 in 2s; model spend $0.0016, total $0.2381
+nvidia/nemotron-3-super-120b-a12b: 12 tasks -> ok 12, truncated 0, error 0 in 3s; model spend $0.0030, total $0.2386
+Qwen/Qwen3.5-397B-A17B: 12 tasks -> ok 12, truncated 0, error 0 in 10s; model spend $0.0149, total $0.2490
+zai-org/GLM-5.2: 12 tasks -> ok 12, truncated 0, error 0 in 3s; model spend $0.0142, total $0.2603
+zai-org/GLM-5.3: 12 tasks -> ok 12, truncated 0, error 0 in 3s; model spend $0.0146, total $0.2706
+nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B: 12 tasks -> ok 12, truncated 0, error 0 in 7s; model spend $0.0260, total $0.2707
+zai-org/GLM-5.3-Flash: 12 tasks -> ok 12, truncated 0, error 0 in 5s; model spend $0.0015, total $0.2719
+nvidia/Nemotron-3_5-Lightning: 12 tasks -> ok 12, truncated 0, error 0 in 10s; model spend $0.0345, total $0.2754
+zai-org/GLM-5.1: 12 tasks -> ok 12, truncated 0, error 0 in 12s; model spend $0.0109, total $0.2831
+moonshotai/Kimi-K2.7-Code: 12 tasks -> ok 12, truncated 0, error 0 in 17s; model spend $0.0095, total $0.2858
+done. total spend $0.2858; tokens in 453,582 out 282,529

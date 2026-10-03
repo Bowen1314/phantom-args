@@ -1,0 +1,629 @@
+[
+ {
+  "condition": "instructed",
+  "model": "anthropic/claude-haiku-4-5@20251001",
+  "task": "phantom-args-instructed",
+  "version": "2",
+  "run_id": "4022738",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 178,
+  "scored": 202,
+  "kaggle_score": 0.8811881188118812,
+  "cost": 0.1516,
+  "mean_out": 87,
+  "max_out": 264
+ },
+ {
+  "condition": "instructed",
+  "model": "anthropic/claude-opus-5@default",
+  "task": "phantom-args-instructed",
+  "version": "2",
+  "run_id": "4023259",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 201,
+  "scored": 202,
+  "kaggle_score": 0.995049504950495,
+  "cost": 0.711,
+  "mean_out": 58,
+  "max_out": 169
+ },
+ {
+  "condition": "instructed",
+  "model": "anthropic/claude-sonnet-5@default",
+  "task": "phantom-args-instructed",
+  "version": "2",
+  "run_id": "4023257",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 201,
+  "scored": 202,
+  "kaggle_score": 0.995049504950495,
+  "cost": 0.3372,
+  "mean_out": 84,
+  "max_out": 280
+ },
+ {
+  "condition": "instructed",
+  "model": "google/gemini-3.5-flash-lite",
+  "task": "phantom-args-instructed",
+  "version": "2",
+  "run_id": "4022733",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 197,
+  "scored": 202,
+  "kaggle_score": 0.9752475247524752,
+  "cost": 0.0382,
+  "mean_out": 39,
+  "max_out": 102
+ },
+ {
+  "condition": "instructed",
+  "model": "google/gemini-3.7-flash",
+  "task": "phantom-args-instructed",
+  "version": "2",
+  "run_id": "4022713",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 202,
+  "scored": 202,
+  "kaggle_score": 1.0,
+  "cost": 0.2293,
+  "mean_out": 242,
+  "max_out": 1573
+ },
+ {
+  "condition": "instructed",
+  "model": "google/gemma-4-26b-a4b",
+  "task": "phantom-args-instructed",
+  "version": "2",
+  "run_id": "4022735",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 199,
+  "scored": 202,
+  "kaggle_score": 0.9851485148514851,
+  "cost": 0.0519,
+  "mean_out": 352,
+  "max_out": 2015
+ },
+ {
+  "condition": "instructed",
+  "model": "google/gemma-4-31b",
+  "task": "phantom-args-instructed",
+  "version": "2",
+  "run_id": "4022734",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 202,
+  "scored": 202,
+  "kaggle_score": 1.0,
+  "cost": 0.0445,
+  "mean_out": 291,
+  "max_out": 1545
+ },
+ {
+  "condition": "instructed",
+  "model": "openai/gpt-5.4-mini-2026-03-17",
+  "task": "phantom-args-instructed",
+  "version": "2",
+  "run_id": "4022737",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 192,
+  "scored": 202,
+  "kaggle_score": 0.9504950495049505,
+  "cost": 0.0745,
+  "mean_out": 32,
+  "max_out": 80
+ },
+ {
+  "condition": "instructed",
+  "model": "openai/gpt-5.4-nano-2026-03-17",
+  "task": "phantom-args-instructed",
+  "version": "2",
+  "run_id": "4022736",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 184,
+  "scored": 202,
+  "kaggle_score": 0.9108910891089109,
+  "cost": 0.0204,
+  "mean_out": 33,
+  "max_out": 74
+ },
+ {
+  "condition": "instructed",
+  "model": "openai/gpt-5.5-2026-04-23",
+  "task": "phantom-args-instructed",
+  "version": "2",
+  "run_id": "4023258",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 201,
+  "scored": 202,
+  "kaggle_score": 0.995049504950495,
+  "cost": 0.7558,
+  "mean_out": 75,
+  "max_out": 292
+ },
+ {
+  "condition": "instructed",
+  "model": "openai/gpt-oss-20b",
+  "task": "phantom-args-instructed",
+  "version": "2",
+  "run_id": "4022739",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 2,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 186,
+  "scored": 202,
+  "kaggle_score": 0.9207920792079208,
+  "cost": 0.0102,
+  "mean_out": 149,
+  "max_out": 747
+ },
+ {
+  "condition": "may_decline",
+  "model": "anthropic/claude-haiku-4-5@20251001",
+  "task": "phantom-args-may-decline",
+  "version": "2",
+  "run_id": "4022299",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 193,
+  "scored": 202,
+  "kaggle_score": 0.9554455445544554,
+  "cost": 0.124,
+  "mean_out": 56,
+  "max_out": 326
+ },
+ {
+  "condition": "may_decline",
+  "model": "anthropic/claude-opus-5@default",
+  "task": "phantom-args-may-decline",
+  "version": "2",
+  "run_id": "4022414",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 202,
+  "scored": 202,
+  "kaggle_score": 1.0,
+  "cost": 0.9387,
+  "mean_out": 96,
+  "max_out": 457
+ },
+ {
+  "condition": "may_decline",
+  "model": "anthropic/claude-sonnet-5@default",
+  "task": "phantom-args-may-decline",
+  "version": "2",
+  "run_id": "4022412",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 201,
+  "scored": 202,
+  "kaggle_score": 0.995049504950495,
+  "cost": 0.396,
+  "mean_out": 106,
+  "max_out": 435
+ },
+ {
+  "condition": "may_decline",
+  "model": "google/gemini-3.5-flash-lite",
+  "task": "phantom-args-may-decline",
+  "version": "2",
+  "run_id": "3981510",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 202,
+  "scored": 202,
+  "kaggle_score": 1.0,
+  "cost": 0.0378,
+  "mean_out": 36,
+  "max_out": 107
+ },
+ {
+  "condition": "may_decline",
+  "model": "google/gemini-3.7-flash",
+  "task": "phantom-args-may-decline",
+  "version": "2",
+  "run_id": "3981498",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 202,
+  "scored": 202,
+  "kaggle_score": 1.0,
+  "cost": 0.3339,
+  "mean_out": 376,
+  "max_out": 3392
+ },
+ {
+  "condition": "may_decline",
+  "model": "google/gemma-4-26b-a4b",
+  "task": "phantom-args-may-decline",
+  "version": "2",
+  "run_id": "3981511",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 201,
+  "scored": 202,
+  "kaggle_score": 0.995049504950495,
+  "cost": 0.0647,
+  "mean_out": 453,
+  "max_out": 2542
+ },
+ {
+  "condition": "may_decline",
+  "model": "google/gemma-4-31b",
+  "task": "phantom-args-may-decline",
+  "version": "2",
+  "run_id": "4023488",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 201,
+  "scored": 202,
+  "kaggle_score": 0.995049504950495,
+  "cost": 0.0567,
+  "mean_out": 387,
+  "max_out": 2135
+ },
+ {
+  "condition": "may_decline",
+  "model": "openai/gpt-5.4-mini-2026-03-17",
+  "task": "phantom-args-may-decline",
+  "version": "2",
+  "run_id": "3981703",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 197,
+  "scored": 202,
+  "kaggle_score": 0.9752475247524752,
+  "cost": 0.0781,
+  "mean_out": 33,
+  "max_out": 80
+ },
+ {
+  "condition": "may_decline",
+  "model": "openai/gpt-5.4-nano-2026-03-17",
+  "task": "phantom-args-may-decline",
+  "version": "2",
+  "run_id": "3981508",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 182,
+  "scored": 202,
+  "kaggle_score": 0.900990099009901,
+  "cost": 0.0214,
+  "mean_out": 34,
+  "max_out": 78
+ },
+ {
+  "condition": "may_decline",
+  "model": "openai/gpt-5.5-2026-04-23",
+  "task": "phantom-args-may-decline",
+  "version": "2",
+  "run_id": "4022413",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 202,
+  "scored": 202,
+  "kaggle_score": 1.0,
+  "cost": 0.8135,
+  "mean_out": 81,
+  "max_out": 332
+ },
+ {
+  "condition": "may_decline",
+  "model": "openai/gpt-oss-20b",
+  "task": "phantom-args-may-decline",
+  "version": "2",
+  "run_id": "3981509",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 10,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 187,
+  "scored": 202,
+  "kaggle_score": 0.9257425742574258,
+  "cost": 0.01,
+  "mean_out": 141,
+  "max_out": 639
+ },
+ {
+  "condition": "neutral",
+  "model": "anthropic/claude-haiku-4-5@20251001",
+  "task": "phantom-args-neutral",
+  "version": "2",
+  "run_id": "3980743",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 179,
+  "scored": 202,
+  "kaggle_score": 0.8861386138613861,
+  "cost": 0.1416,
+  "mean_out": 82,
+  "max_out": 275
+ },
+ {
+  "condition": "neutral",
+  "model": "anthropic/claude-opus-5@default",
+  "task": "phantom-args-neutral",
+  "version": "2",
+  "run_id": "4022321",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 202,
+  "scored": 202,
+  "kaggle_score": 1.0,
+  "cost": 0.7233,
+  "mean_out": 66,
+  "max_out": 310
+ },
+ {
+  "condition": "neutral",
+  "model": "anthropic/claude-sonnet-5@default",
+  "task": "phantom-args-neutral",
+  "version": "2",
+  "run_id": "4022319",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 199,
+  "scored": 202,
+  "kaggle_score": 0.9851485148514851,
+  "cost": 0.3325,
+  "mean_out": 88,
+  "max_out": 449
+ },
+ {
+  "condition": "neutral",
+  "model": "google/gemini-3.5-flash-lite",
+  "task": "phantom-args-neutral",
+  "version": "2",
+  "run_id": "3980738",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 194,
+  "scored": 202,
+  "kaggle_score": 0.9603960396039604,
+  "cost": 0.0369,
+  "mean_out": 39,
+  "max_out": 106
+ },
+ {
+  "condition": "neutral",
+  "model": "google/gemini-3.7-flash",
+  "task": "phantom-args-neutral",
+  "version": "2",
+  "run_id": "3980730",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 201,
+  "scored": 202,
+  "kaggle_score": 0.995049504950495,
+  "cost": 0.2172,
+  "mean_out": 231,
+  "max_out": 1087
+ },
+ {
+  "condition": "neutral",
+  "model": "google/gemma-4-26b-a4b",
+  "task": "phantom-args-neutral",
+  "version": "2",
+  "run_id": "3980740",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 198,
+  "scored": 202,
+  "kaggle_score": 0.9801980198019802,
+  "cost": 0.047,
+  "mean_out": 317,
+  "max_out": 1474
+ },
+ {
+  "condition": "neutral",
+  "model": "google/gemma-4-31b",
+  "task": "phantom-args-neutral",
+  "version": "2",
+  "run_id": "3980739",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 202,
+  "scored": 202,
+  "kaggle_score": 1.0,
+  "cost": 0.0449,
+  "mean_out": 300,
+  "max_out": 1931
+ },
+ {
+  "condition": "neutral",
+  "model": "openai/gpt-5.4-mini-2026-03-17",
+  "task": "phantom-args-neutral",
+  "version": "2",
+  "run_id": "3980742",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 188,
+  "scored": 202,
+  "kaggle_score": 0.9306930693069307,
+  "cost": 0.072,
+  "mean_out": 33,
+  "max_out": 80
+ },
+ {
+  "condition": "neutral",
+  "model": "openai/gpt-5.4-nano-2026-03-17",
+  "task": "phantom-args-neutral",
+  "version": "2",
+  "run_id": "3980741",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 185,
+  "scored": 202,
+  "kaggle_score": 0.9158415841584159,
+  "cost": 0.0197,
+  "mean_out": 34,
+  "max_out": 78
+ },
+ {
+  "condition": "neutral",
+  "model": "openai/gpt-5.5-2026-04-23",
+  "task": "phantom-args-neutral",
+  "version": "2",
+  "run_id": "4022320",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 0,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 201,
+  "scored": 202,
+  "kaggle_score": 0.995049504950495,
+  "cost": 0.7287,
+  "mean_out": 74,
+  "max_out": 214
+ },
+ {
+  "condition": "neutral",
+  "model": "openai/gpt-oss-20b",
+  "task": "phantom-args-neutral",
+  "version": "2",
+  "run_id": "3980744",
+  "answered": 202,
+  "truncated": 0,
+  "empty": 6,
+  "max_tokens": [
+   8000
+  ],
+  "correct": 178,
+  "scored": 202,
+  "kaggle_score": 0.8811881188118812,
+  "cost": 0.0093,
+  "mean_out": 152,
+  "max_out": 469
+ }
+]

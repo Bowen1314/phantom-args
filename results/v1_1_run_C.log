@@ -1,0 +1,15 @@
+run: 11 models, 308 calls to make (616 already on disk)
+key: NEBIUS_API_KEY (len=235); endpoint host pinned and https verified
+ledger: $3.8246 already spent; cap $3.93 total, $0.60 per model
+Qwen/Qwen3-30B-A3B-Instruct-2507: 28 tasks -> ok 28, truncated 0, error 0 in 6s; model spend $0.0357, total $3.8285
+google/gemma-3-27b-it: 28 tasks -> ok 28, truncated 0, error 0 in 6s; model spend $0.0362, total $3.8286
+Qwen/Qwen3-235B-A22B-Instruct-2507: 28 tasks -> ok 28, truncated 0, error 0 in 6s; model spend $0.0413, total $3.8288
+openbmb/MiniCPM-V-4_5: 28 tasks -> ok 28, truncated 0, error 0 in 3s; model spend $0.1196, total $3.8354
+nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B: 28 tasks -> ok 28, truncated 0, error 0 in 21s; model spend $0.0625, total $3.8435
+openai/gpt-oss-120b: 28 tasks -> ok 28, truncated 0, error 0 in 7s; model spend $0.0690, total $3.8505
+zai-org/GLM-5.3-Flash: 28 tasks -> ok 28, truncated 0, error 0 in 31s; model spend $0.0753, total $3.8512
+deepseek-ai/DeepSeek-V4-Flash-0731: 28 tasks -> ok 28, truncated 0, error 0 in 42s; model spend $0.0487, total $3.8566
+nvidia/nemotron-3-super-120b-a12b: 28 tasks -> ok 28, truncated 0, error 0 in 15s; model spend $0.1249, total $3.8702
+NousResearch/Hermes-4-405B: 28 tasks -> ok 28, truncated 0, error 0 in 10s; model spend $0.2061, total $3.8724
+nvidia/Nemotron-3_5-Lightning: 28 tasks -> ok 28, truncated 0, error 0 in 100s; model spend $0.1295, total $3.8803
+done. total spend $3.8803; tokens in 3,006,179 out 1,717,405

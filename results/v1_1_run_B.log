@@ -1,0 +1,15 @@
+run: 11 models, 660 calls to make (0 already on disk)
+key: NEBIUS_API_KEY (len=235); endpoint host pinned and https verified
+ledger: $3.7088 already spent; cap $3.90 total, $0.60 per model
+Qwen/Qwen3-235B-A22B-Instruct-2507: 60 tasks -> ok 60, truncated 0, error 0 in 19s; model spend $0.0392, total $3.7173
+google/gemma-3-27b-it: 60 tasks -> ok 60, truncated 0, error 0 in 22s; model spend $0.0351, total $3.7230
+openbmb/MiniCPM-V-4_5: 60 tasks -> ok 60, truncated 0, error 0 in 8s; model spend $0.1134, total $3.7361
+Qwen/Qwen3-30B-A3B-Instruct-2507: 60 tasks -> ok 60, truncated 0, error 0 in 35s; model spend $0.0347, total $3.7389
+nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B: 60 tasks -> ok 60, truncated 0, error 0 in 19s; model spend $0.0587, total $3.7406
+openai/gpt-oss-120b: 60 tasks -> ok 60, truncated 0, error 0 in 11s; model spend $0.0644, total $3.7500
+nvidia/Nemotron-3_5-Lightning: 60 tasks -> ok 60, truncated 0, error 0 in 54s; model spend $0.1207, total $3.7703
+zai-org/GLM-5.3-Flash: 60 tasks -> ok 58, truncated 2, error 0 in 79s; model spend $0.0702, total $3.7785
+nvidia/nemotron-3-super-120b-a12b: 60 tasks -> ok 60, truncated 0, error 0 in 24s; model spend $0.1164, total $3.8085
+NousResearch/Hermes-4-405B: 60 tasks -> ok 60, truncated 0, error 0 in 18s; model spend $0.1956, total $3.8158
+deepseek-ai/DeepSeek-V4-Flash-0731: 60 tasks -> ok 60, truncated 0, error 0 in 400s; model spend $0.0446, total $3.8246
+done. total spend $3.8246; tokens in 2,917,606 out 1,634,137

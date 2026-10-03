@@ -1,0 +1,257 @@
+{
+ "n_full": 324,
+ "n_core": 120,
+ "ledger_spent": 0.2858416780000001,
+ "projected_remaining": 3.2368637471999997,
+ "models": {
+  "MiniMaxAI/MiniMax-M3": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0005649,
+   "mean_completion_tokens": 354.6666666666667,
+   "truncated_seen": 1,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.20946492,
+   "projected_core": 0.07693938,
+   "mode": "full"
+  },
+  "NousResearch/Hermes-4-405B": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0004273333333333334,
+   "mean_completion_tokens": 38.166666666666664,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 0,
+   "projected_full": 0.15845520000000002,
+   "projected_core": 0.058202800000000006,
+   "mode": "full"
+  },
+  "Qwen/Qwen3-235B-A22B-Instruct-2507": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 8.548333333333334e-05,
+   "mean_completion_tokens": 41.75,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 0,
+   "projected_full": 0.03169722,
+   "projected_core": 0.01164283,
+   "mode": "full"
+  },
+  "Qwen/Qwen3-30B-A3B-Instruct-2507": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 4.429166666666666e-05,
+   "mean_completion_tokens": 46.916666666666664,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 0,
+   "projected_full": 0.016423349999999996,
+   "projected_core": 0.006032524999999999,
+   "mode": "full"
+  },
+  "Qwen/Qwen3.5-397B-A17B": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0012379,
+   "mean_completion_tokens": 292.6666666666667,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.45901331999999995,
+   "projected_core": 0.16860197999999998,
+   "mode": "core",
+   "reason": "downgraded to the core subset to fit the total budget"
+  },
+  "Qwen/Qwen3.8-27B": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0008133749999999999,
+   "mean_completion_tokens": 218.75,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.30159944999999994,
+   "projected_core": 0.11078167499999997,
+   "mode": "full"
+  },
+  "deepseek-ai/DeepSeek-V4-Flash-0731": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 7.912333333333334e-05,
+   "mean_completion_tokens": 134.5,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.029338932,
+   "projected_core": 0.010776598000000002,
+   "mode": "full"
+  },
+  "deepseek-ai/DeepSeek-V4-Pro": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0006635416666666666,
+   "mean_completion_tokens": 41.5,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 0,
+   "projected_full": 0.24604124999999993,
+   "projected_core": 0.09037437499999998,
+   "mode": "full",
+   "reason": "ran on the core subset first; upgraded to the full set afterwards because $0.77 of the $4 cap was still unspent"
+  },
+  "deepseek-ai/DeepSeek-V4-Pro-0813": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0010664500000000003,
+   "mean_completion_tokens": 170.58333333333334,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.3954396600000001,
+   "projected_core": 0.14525049000000004,
+   "mode": "core",
+   "reason": "downgraded to the core subset to fit the total budget"
+  },
+  "deepseek-ai/DeepSeek-V4.1-Flash": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.00028254999999999996,
+   "mean_completion_tokens": 154.91666666666666,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.10476953999999997,
+   "projected_core": 0.03848330999999999,
+   "mode": "full"
+  },
+  "google/gemma-3-27b-it": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 4.4966666666666664e-05,
+   "mean_completion_tokens": 47.0,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 0,
+   "projected_full": 0.01667364,
+   "projected_core": 0.00612446,
+   "mode": "full"
+  },
+  "moonshotai/Kimi-K2.6": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0020291333333333334,
+   "mean_completion_tokens": 436.6666666666667,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.75240264,
+   "projected_core": 0.27636795999999997,
+   "mode": "core",
+   "reason": "full matrix projected at $0.75 > $0.60 per-model cap"
+  },
+  "moonshotai/Kimi-K2.7-Code": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0007934666666666667,
+   "mean_completion_tokens": 127.75,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.29421744,
+   "projected_core": 0.10807016,
+   "mode": "full"
+  },
+  "moonshotai/Kimi-K3": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.00320425,
+   "mean_completion_tokens": 138.75,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 1.1881359,
+   "projected_core": 0.43641884999999997,
+   "mode": "core",
+   "reason": "core subset only: the full matrix was projected at $1.19, above the $0.60 per-model cap"
+  },
+  "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 7.082999999999998e-05,
+   "mean_completion_tokens": 217.0,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.02626376399999999,
+   "projected_core": 0.009647045999999998,
+   "mode": "full"
+  },
+  "nvidia/Nemotron-3-Ultra-550b-a55b": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0009119999999999999,
+   "mean_completion_tokens": 199.83333333333334,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.33816959999999996,
+   "projected_core": 0.12421439999999999,
+   "mode": "full"
+  },
+  "nvidia/Nemotron-3_5-Lightning": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.00016454999999999996,
+   "mean_completion_tokens": 607.5,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.06101513999999998,
+   "projected_core": 0.022411709999999994,
+   "mode": "full"
+  },
+  "nvidia/nemotron-3-super-120b-a12b": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.00025184999999999997,
+   "mean_completion_tokens": 175.66666666666666,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.09338597999999998,
+   "projected_core": 0.034301969999999994,
+   "mode": "full"
+  },
+  "openai/gpt-oss-120b": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.00013465000000000002,
+   "mean_completion_tokens": 135.5,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.04992822,
+   "projected_core": 0.01833933,
+   "mode": "full"
+  },
+  "openbmb/MiniCPM-V-4_5": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.00024720316666666667,
+   "mean_completion_tokens": 43.583333333333336,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 0,
+   "projected_full": 0.0916629342,
+   "projected_core": 0.0336690713,
+   "mode": "full"
+  },
+  "zai-org/GLM-5.1": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0009102333333333331,
+   "mean_completion_tokens": 113.16666666666667,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.3375145199999999,
+   "projected_core": 0.12397377999999995,
+   "mode": "full",
+   "reason": "ran on the core subset first; upgraded to the full set afterwards because $0.77 of the $4 cap was still unspent"
+  },
+  "zai-org/GLM-5.2": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0011796333333333334,
+   "mean_completion_tokens": 172.16666666666666,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.43740804,
+   "projected_core": 0.16066606,
+   "mode": "core",
+   "reason": "downgraded to the core subset to fit the total budget"
+  },
+  "zai-org/GLM-5.3": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.0012177666666666669,
+   "mean_completion_tokens": 180.83333333333334,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.45154788,
+   "projected_core": 0.16585982,
+   "mode": "core",
+   "reason": "downgraded to the core subset to fit the total budget"
+  },
+  "zai-org/GLM-5.3-Flash": {
+   "calls_seen": 12,
+   "mean_cost_per_call": 0.00012093333333333331,
+   "mean_completion_tokens": 151.41666666666666,
+   "truncated_seen": 0,
+   "reasoning_calls_seen": 12,
+   "projected_full": 0.044842079999999986,
+   "projected_core": 0.016471119999999995,
+   "mode": "full"
+  }
+ },
+ "note": "Plan computed by `run_local.py plan` (safety x1.15, 90% of $4), then three manual changes listed in the per-model reason fields."
+}

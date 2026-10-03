@@ -1,0 +1,2587 @@
+# %% [markdown]
+# # Phantom arguments: what does a model do when the tool cannot do what was asked?
+#
+# Each item shows the model ONE tool definition (JSON Schema, `additionalProperties: false`) and ONE user
+# request. The model answers with one JSON tool call written as text. The request asks for something the tool
+# cannot do. Scoring is JSON Schema validation plus fixed per-item checks. There is no LLM judge.
+#
+# - Items v1.1: 202 items, 75 invented tools, eight families.
+#   v1.0 (162 items, unchanged): `conventional`, `near_miss`, `inexpressible`, `enum_pressure`, `nested`, `control`.
+#   v1.1 adds `repurposing` (28: the tool has a tempting parameter that means something else, e.g. `cc` for a
+#   BCC request) and `matched_control` (12: the same parameter is the right one).
+# - Three prompt conditions, one task each: `neutral` (the model must call), `instructed` (one extra sentence:
+#   use only the schema's parameters), `may_decline` (one extra sentence: it may answer
+#   `{"cannot_do": "..."}` instead of calling).
+# - Tool calls are rendered as plain text. This is NOT a provider's native tool-calling API.
+#
+# **Generated file** (kaggle/build_notebook.py in the project repo). Built with AI assistance.
+#
+# ## What is verified and what is not
+# The prompt builder, parser, scorer, report and items are the code that produced the local runs and are
+# covered by the project's tests. Every call into `kaggle_benchmarks` lives in ONE cell, "Kaggle adapter",
+# except the main task's `@kbench.task(...)` decorator, which the editor's task panel needs to see literally.
+# This notebook was run end to end on Kaggle on 2026-10-02 (kaggle-benchmarks 0.6.1, model
+# google/gemini-3.7-flash). If something fails on Kaggle later, the adapter cell is the place to patch.
+#
+# Editor rules learned the hard way: `TASK_NAME` must be a plain string literal, the main task's decorator must
+# be a literal, top-level `@kbench.task(name="...")` (the editor panel and `kaggle b t push` both read the name
+# without running code), and an HTML/SVG tag name in angle brackets anywhere in the source (the SVG tag "text",
+# in a docstring) hides every task from the panel.
+#
+# Command line (Kaggle CLI 2.2.4): `kaggle b t push phantom-args-neutral -f benchmark_notebook.py --wait`, then
+# `kaggle b t run phantom-args-neutral -m MODEL`. Each run executes this file on Kaggle against one model;
+# `kaggle b t download` returns the run's files, including phantom_records.jsonl (every reply, its cost and usage).
+
+# %%
+# ----------------------------------------------------------------------------- configuration
+CONDITION = "may_decline"         # "neutral" (must call), "instructed", or "may_decline". One task per condition.
+SUBSET = "full"               # "full": all 202 items (the leaderboard setting: every model gets the same items).
+                              # "core": 10 items per family (80).
+                              # "auto": every item if the probe projects <= PER_MODEL_BUDGET_USD, else the core subset
+ONLY_FAMILIES = None          # None = all eight families, or a list such as ["repurposing", "matched_control"]
+PER_MODEL_BUDGET_USD = 0.60   # used by SUBSET = "auto"
+SESSION_BUDGET_USD = 2.00     # no paid call is started once this run has spent this much (daily quota: $10;
+                              # a full run cost at most about $1.20 per model and condition on 2026-10-02)
+MAX_CALLS_IF_COST_UNKNOWN = 400   # fallback guard when the library reports no cost for a call
+EXTRA_MODELS = []             # model slugs to ALSO run in this session, e.g. ["google/gemini-2.5-flash"]; [] = only the task's model
+PARALLEL_JOBS = 8             # 0 = plain sequential loop (smallest API surface, slowest)
+TEMPERATURE = 0
+MAX_OUTPUT_TOKENS = 8000      # sent as max_tokens. Kaggle's Model Proxy reserves quota for every call from its output
+                              # cap and refuses calls (403) once reservations exceed the quota left; without a cap it
+                              # reserves the model's full maximum. Largest reply seen on Kaggle: 2,144 tokens (local
+                              # runs used 3,000). A reply that reaches the cap is kept, scored, and marked truncated.
+CACHE_DIR = "/kaggle/working"  # replies are appended here as they arrive; a re-run never repeats a cached call
+TASK_NAME = "phantom_args_may_decline" # a plain literal on purpose: the editor's Benchmark Task panel reads task names
+                                     # without running code and shows an f-string unresolved. Change it together with
+                                     # CONDITION, the main task's decorator and the %choose line in the last cell.
+assert TASK_NAME == f"phantom_args_{CONDITION}", "set TASK_NAME (and the %choose line) to phantom_args_<CONDITION>"
+
+# %%
+import base64
+import glob
+import json
+import math
+import os
+import threading
+import time
+import zlib
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any, Iterable, Iterator
+
+if not os.path.isdir(CACHE_DIR):          # running outside Kaggle
+    CACHE_DIR = "."
+
+# %%
+# ----------------------------------------------------------------------------- prompt builder
+# Inlined verbatim from phantom_args/prompt.py (project repo); covered by the project's tests.
+"""Prompt builder.
+
+The whole item is rendered into ONE user message so that the exact same text
+can be sent through any chat API (local runner) and through
+`llm.prompt(...)` in a Kaggle notebook. No native tool-calling is used.
+
+Three conditions:
+  neutral     - the base prompt: the model must call
+  instructed  - the base prompt plus one sentence (use only the schema's parameters)
+  may_decline - the base prompt plus one sentence that allows a decline in a
+                fixed JSON form instead of a call (added in v1.1)
+"""
+
+import hashlib
+import json
+
+CONDITIONS = ("neutral", "instructed", "may_decline")
+# The two conditions of v1.0. `may_decline` was added in v1.1 and changes no v1.0 prompt.
+BASE_CONDITIONS = ("neutral", "instructed")
+
+# The one sentence that separates the two conditions.
+INSTRUCTION_SENTENCE = (
+    "Use only the parameters defined in the tool's schema; do not add any "
+    "parameter that is not listed there."
+)
+
+# The one sentence of the third condition: a way out, in a fixed format so that
+# a decline can be read without any judgement.
+DECLINE_KEY = "cannot_do"
+DECLINE_SENTENCE = (
+    "If the tool cannot do what the user asked, do not call it: reply instead "
+    'with exactly this JSON object and nothing else: {"cannot_do": "<one '
+    'sentence saying what the tool cannot do>"}.'
+)
+
+_HEADER = (
+    "You are an assistant that completes user requests by calling tools. "
+    "You will be shown the available tool definition(s) and one user request. "
+    "Reply with exactly one tool call and nothing else, as a single JSON object "
+    'of the form {"name": "<tool name>", "arguments": {...}}. '
+    "After your call you will see the tool's result and can then answer the user."
+)
+
+
+def render_tool(tool: dict) -> str:
+    """Compact one-line JSON, the way most chat templates serialise tools."""
+    return json.dumps(
+        {
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["parameters"],
+        },
+        ensure_ascii=False,
+        separators=(", ", ": "),
+    )
+
+
+def build_prompt(item: dict, condition: str = "neutral") -> str:
+    if condition not in CONDITIONS:
+        raise ValueError(f"unknown condition {condition!r}")
+    tools = item["tools"]
+    header = _HEADER
+    if condition == "instructed":
+        header = header + " " + INSTRUCTION_SENTENCE
+    elif condition == "may_decline":
+        header = header + " " + DECLINE_SENTENCE
+    label = "Available tool:" if len(tools) == 1 else "Available tools:"
+    rendered = "\n".join(render_tool(t) for t in tools)
+    return f"{header}\n\n{label}\n{rendered}\n\nUser request: {item['request']}"
+
+
+def build_messages(item: dict, condition: str = "neutral") -> list[dict]:
+    return [{"role": "user", "content": build_prompt(item, condition)}]
+
+
+def prompt_sha(item: dict, condition: str = "neutral") -> str:
+    """Short hash of the exact prompt text; stored with every reply so that a
+    reply recorded for an older version of an item is never scored against the
+    current one."""
+    return hashlib.sha1(build_prompt(item, condition).encode("utf-8")).hexdigest()[:12]
+
+# %%
+# ----------------------------------------------------------------------------- tolerant parser
+# Inlined verbatim from phantom_args/parser.py (project repo); covered by the project's tests.
+"""Tolerant tool-call parser.
+
+Turns a model's free-text reply into `ParsedCall(name, arguments)` or a parse
+failure with a reason. It never guesses about schema validity; that is the
+scorer's job.
+
+Tolerated:
+  - code fences, <tool_call> tags, prose before/after the JSON
+  - leaked <think>...</think> blocks
+  - trailing commas, Python-literal dicts (single quotes, True/False/None)
+  - `arguments` given as a JSON string
+  - wrapper shapes: {"tool_call": {...}}, {"function": {...}}, {"tool_calls": [...]}
+  - alias keys: tool / tool_name / function for the name;
+    args / parameters / input / params for the arguments
+  - a "flattened" call {"name": "t", "query": ...} and a bare arguments object
+    (both flagged as format deviations)
+
+Not tolerated (reported as their own outcome, never as a phantom argument):
+  - empty reply                                -> reason "empty"
+  - no JSON object at all                      -> reason "no_json"
+  - JSON that is not shaped like a tool call   -> reason "not_a_tool_call"
+  - two or more *different* tool calls         -> reason "multiple_calls"
+  - braces present but no complete call decodes -> reason "malformed_json"
+    (prose with no "{" at all is "no_json": the model answered in words)
+  - arguments that are not a JSON object       -> reason "arguments_not_object"
+
+Declines (v1.1, `may_decline` condition only, `allow_decline=True`):
+  - {"cannot_do": "TEXT"} and no call         -> declined, reason "declined"
+  - a decline together with a named call       -> reason "call_and_decline"
+  A refusal written as prose is still "no_json": the format was not followed.
+
+The tool library never uses a top-level parameter called name / tool /
+function / arguments / args / parameters / params / input / type / id (the
+item builder enforces this), so the "flattened" shape is unambiguous.
+"""
+
+import ast
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+DECLINE_KEY = "cannot_do"
+NAME_KEYS = ("name", "tool", "tool_name", "function_name", "function")
+ARG_KEYS = ("arguments", "args", "parameters", "params", "input", "tool_input")
+
+_THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+@dataclass
+class ParsedCall:
+    ok: bool
+    name: str | None = None
+    arguments: Any = None
+    reason: str | None = None          # set when ok is False
+    notes: list[str] = field(default_factory=list)   # format deviations that were tolerated
+    n_candidates: int = 0
+    declined: bool = False             # may_decline condition only: the reply was {"cannot_do": "..."}
+    decline_text: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "ok": self.ok,
+            "name": self.name,
+            "arguments": self.arguments,
+            "reason": self.reason,
+            "notes": list(self.notes),
+        }
+
+
+# --------------------------------------------------------------------------
+# low-level helpers
+# --------------------------------------------------------------------------
+def strip_think(text: str) -> str:
+    """Remove leaked reasoning blocks; also handles a dangling `</think>`."""
+    text = _THINK_RE.sub("", text)
+    low = text.lower()
+    for closer in ("</think>", "</thinking>"):
+        idx = low.rfind(closer)
+        if idx != -1:
+            text = text[idx + len(closer):]
+            low = text.lower()
+    return text
+
+
+def _balanced_objects(text: str) -> list[str]:
+    """Return every outermost {...} substring, honouring string literals."""
+    out: list[str] = []
+    depth = 0
+    start = -1
+    quote: str | None = None
+    escape = False
+    for i, ch in enumerate(text):
+        if quote is not None:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                quote = None
+            continue
+        if depth > 0 and ch in ('"', "'"):
+            # Only treat ' as a string delimiter when it plausibly opens a
+            # Python-style string (after one of  { [ , :  ), so that an
+            # apostrophe inside prose never swallows the rest of the text.
+            if ch == "'":
+                j = i - 1
+                while j >= 0 and text[j] in " \t\r\n":
+                    j -= 1
+                if j < 0 or text[j] not in "{[,:":
+                    continue
+            quote = ch
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start != -1:
+                    out.append(text[start:i + 1])
+                    start = -1
+    return out
+
+
+def _raw_decode_objects(text: str) -> list[str]:
+    """Fallback scan: try a strict JSON decode at every "{".
+
+    Used only when the balanced-brace scan finds nothing decodable, e.g. when
+    a stray "{" in the prose before the call unbalances the whole reply.
+    """
+    decoder = json.JSONDecoder()
+    out: list[str] = []
+    i = 0
+    while True:
+        i = text.find("{", i)
+        if i == -1:
+            return out
+        try:
+            value, end = decoder.raw_decode(text, i)
+        except (json.JSONDecodeError, RecursionError):
+            i += 1
+            continue
+        if isinstance(value, dict):
+            out.append(text[i:end])
+        i = end
+
+
+def loads_lenient(blob: str) -> tuple[Any, list[str]]:
+    """json.loads with two repairs. Raises ValueError if nothing works."""
+    try:
+        return json.loads(blob), []
+    except (json.JSONDecodeError, RecursionError):
+        pass
+    repaired = _TRAILING_COMMA_RE.sub(r"\1", blob)
+    if repaired != blob:
+        try:
+            return json.loads(repaired), ["trailing_comma"]
+        except (json.JSONDecodeError, RecursionError):
+            pass
+    try:
+        value = ast.literal_eval(repaired)
+    except (ValueError, SyntaxError, MemoryError, RecursionError, TypeError):
+        raise ValueError("not JSON") from None
+    if isinstance(value, (dict, list)):
+        return value, ["python_literal"]
+    raise ValueError("not JSON")
+
+
+def _looks_like_tool_definition(obj: dict) -> bool:
+    """A model sometimes echoes the tool spec; that is not a call."""
+    params = obj.get("parameters")
+    return (
+        isinstance(params, dict)
+        and params.get("type") == "object"
+        and "properties" in params
+        and ("description" in obj or "required" in params or "additionalProperties" in params)
+    )
+
+
+def _coerce_arguments(value: Any, notes: list[str]) -> Any:
+    """Arguments may arrive as a JSON string; decode once (twice if nested)."""
+    for _ in range(2):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("{"):
+                try:
+                    value, extra = loads_lenient(stripped)
+                except ValueError:
+                    return value
+                if "arguments_as_string" not in notes:
+                    notes.append("arguments_as_string")
+                for n in extra:
+                    if n not in notes:
+                        notes.append(n)
+                continue
+        break
+    return value
+
+
+def _extract_calls(obj: Any, notes: list[str]) -> list[tuple[str | None, Any, list[str]]]:
+    """Normalise one decoded JSON value into zero or more (name, args, notes)."""
+    if isinstance(obj, list):
+        calls: list = []
+        for el in obj:
+            calls.extend(_extract_calls(el, notes))
+        return calls
+    if not isinstance(obj, dict):
+        return []
+    if _looks_like_tool_definition(obj):
+        return []
+
+    # wrappers
+    for wrapper in ("tool_call", "function_call"):
+        if isinstance(obj.get(wrapper), dict):
+            return _extract_calls(obj[wrapper], notes + [f"wrapped:{wrapper}"])
+    if isinstance(obj.get("tool_calls"), list):
+        return _extract_calls(obj["tool_calls"], notes + ["wrapped:tool_calls"])
+    if isinstance(obj.get("function"), dict):
+        return _extract_calls(obj["function"], notes + ["wrapped:function"])
+
+    name_key = next((k for k in NAME_KEYS if isinstance(obj.get(k), str)), None)
+    arg_key = next((k for k in ARG_KEYS if k in obj), None)
+    local = list(notes)
+
+    if name_key and arg_key:
+        if name_key != "name":
+            local.append(f"name_key:{name_key}")
+        if arg_key != "arguments":
+            local.append(f"arguments_key:{arg_key}")
+        args = _coerce_arguments(obj[arg_key], local)
+        return [(obj[name_key], args, local)]
+
+    if name_key and not arg_key:
+        rest = {k: v for k, v in obj.items() if k != name_key and k not in ("type", "id")}
+        if rest:
+            local.append("flattened_arguments")
+        else:
+            local.append("no_arguments_key")
+        if name_key != "name":
+            local.append(f"name_key:{name_key}")
+        return [(obj[name_key], rest, local)]
+
+    if arg_key and not name_key and len(obj) == 1:
+        local.append("missing_name")
+        args = _coerce_arguments(obj[arg_key], local)
+        return [(None, args, local)]
+
+    # No name at all: treat the whole object as a bare arguments object.
+    local.append("bare_arguments")
+    return [(None, obj, local)]
+
+
+# --------------------------------------------------------------------------
+# public API
+# --------------------------------------------------------------------------
+def _is_decline(value: Any) -> bool:
+    """{"cannot_do": "..."} and nothing that looks like a call."""
+    return (isinstance(value, dict) and DECLINE_KEY in value
+            and not any(k in value for k in NAME_KEYS + ARG_KEYS))
+
+
+def parse_tool_call(text: str | None, known_tools: list[str] | None = None,
+                    allow_decline: bool = False) -> ParsedCall:
+    """Parse a model reply into exactly one tool call.
+
+    With `allow_decline` (the `may_decline` prompt condition only) a reply
+    whose JSON is {"cannot_do": "..."} is returned as a decline
+    (`declined=True`, `ok=False`, reason "declined"). A reply that both
+    declines and calls is a parse failure ("call_and_decline"). Without the
+    flag nothing changes: v1.0 conditions are parsed exactly as before.
+
+    `known_tools` (the tool names shown in the prompt) is only used to
+    interpret a reply whose arguments were given without a name wrapper: when
+    exactly one tool was offered, the bare arguments are attributed to it.
+    """
+    if text is None or not str(text).strip():
+        return ParsedCall(ok=False, reason="empty")
+    cleaned = strip_think(str(text))
+
+    decoded: list[tuple[Any, list[str]]] = []
+    for blob in _balanced_objects(cleaned):
+        try:
+            value, repair_notes = loads_lenient(blob)
+        except ValueError:
+            continue
+        decoded.append((value, repair_notes))
+    if not decoded:
+        # Nothing balanced decodes. Scan for any decodable object, but accept
+        # only complete named calls: a fragment from inside a broken call (one
+        # array item, one nested object) must not be mistaken for the call.
+        fragments = _raw_decode_objects(cleaned)
+        for blob in fragments:
+            value = json.loads(blob)
+            if (allow_decline and _is_decline(value)) or any(
+                    name is not None for name, _, _ in _extract_calls(value, [])):
+                decoded.append((value, ["recovered_by_scan"]))
+        if not decoded:
+            broken = bool(fragments) or "{" in cleaned
+            return ParsedCall(ok=False, reason="malformed_json" if broken else "no_json",
+                              n_candidates=len(fragments))
+
+    declines: list[Any] = []
+    if allow_decline:
+        declines = [v for v, _ in decoded if _is_decline(v)]
+        decoded = [(v, n) for v, n in decoded if not _is_decline(v)]
+
+    calls: list[tuple[str | None, Any, list[str]]] = []
+    for value, repair_notes in decoded:
+        calls.extend(_extract_calls(value, list(repair_notes)))
+    if declines:
+        if any(name is not None for name, _, _ in calls):
+            return ParsedCall(ok=False, reason="call_and_decline", n_candidates=len(calls) + len(declines))
+        reason_text = declines[0].get(DECLINE_KEY)
+        return ParsedCall(ok=False, reason="declined", declined=True,
+                          decline_text=reason_text if isinstance(reason_text, str) else json.dumps(reason_text))
+    if not calls:
+        return ParsedCall(ok=False, reason="not_a_tool_call", n_candidates=len(decoded))
+
+    # Prefer properly named calls over bare-argument guesses when both exist.
+    named = [c for c in calls if c[0] is not None]
+    if named:
+        calls = named
+
+    # De-duplicate identical calls (a model repeating itself is still one call).
+    unique: list[tuple[str | None, Any, list[str]]] = []
+    seen: set[str] = set()
+    for name, args, notes in calls:
+        try:
+            key = json.dumps([name, args], sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            key = repr((name, args))
+        if key not in seen:
+            seen.add(key)
+            unique.append((name, args, notes))
+    if len(unique) > 1:
+        return ParsedCall(ok=False, reason="multiple_calls", n_candidates=len(unique))
+
+    name, args, notes = unique[0]
+    if len(calls) > 1 and "repeated_call" not in notes:
+        notes.append("repeated_call")
+    if name is None:
+        if known_tools and len(known_tools) == 1:
+            name = known_tools[0]
+        else:
+            return ParsedCall(ok=False, reason="not_a_tool_call", notes=notes, n_candidates=1)
+    if not isinstance(args, dict):
+        # arguments must be an object; anything else cannot be validated as a call
+        return ParsedCall(ok=False, reason="arguments_not_object", name=name, notes=notes, n_candidates=1)
+    return ParsedCall(ok=True, name=name.strip(), arguments=args, notes=notes, n_candidates=1)
+
+# %%
+# ----------------------------------------------------------------------------- fallback validator (used only if `jsonschema` is not installed)
+# Inlined verbatim from phantom_args/minischema.py (project repo); covered by the project's tests.
+"""A tiny JSON Schema validator used only when `jsonschema` is not installed.
+
+It covers exactly the keywords the tool library uses (the item builder rejects
+anything else): type, enum, properties, required, additionalProperties: false,
+items, minimum, maximum. Errors mimic the attributes of jsonschema's
+ValidationError that the scorer reads. tests/test_minischema.py checks that it
+agrees with jsonschema on every item, every trap and a set of nasty inputs.
+"""
+
+from dataclasses import dataclass, field
+from typing import Any, Iterator
+
+
+@dataclass
+class MiniError:
+    validator: str
+    validator_value: Any
+    instance: Any
+    schema: dict
+    absolute_path: list = field(default_factory=list)
+    message: str = ""
+
+
+def _is_type(value: Any, name: str) -> bool:
+    if name == "string":
+        return isinstance(value, str)
+    if name == "boolean":
+        return isinstance(value, bool)
+    if name == "integer":
+        if isinstance(value, bool):
+            return False
+        return isinstance(value, int) or (isinstance(value, float) and value.is_integer())
+    if name == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if name == "object":
+        return isinstance(value, dict)
+    if name == "array":
+        return isinstance(value, list)
+    if name == "null":
+        return value is None
+    raise ValueError(f"unsupported type {name!r}")
+
+
+def _enum_match(value: Any, options: list) -> bool:
+    for opt in options:
+        if isinstance(value, bool) != isinstance(opt, bool):
+            continue
+        if value == opt:
+            return True
+    return False
+
+
+def iter_errors(schema: dict, instance: Any, path: list | None = None) -> Iterator[MiniError]:
+    path = path or []
+    if "type" in schema and not _is_type(instance, schema["type"]):
+        yield MiniError("type", schema["type"], instance, schema, list(path),
+                        f"{instance!r} is not of type {schema['type']!r}")
+    if "enum" in schema and not _enum_match(instance, schema["enum"]):
+        yield MiniError("enum", schema["enum"], instance, schema, list(path),
+                        f"{instance!r} is not one of {schema['enum']!r}")
+    if isinstance(instance, (int, float)) and not isinstance(instance, bool):
+        if "minimum" in schema and instance < schema["minimum"]:
+            yield MiniError("minimum", schema["minimum"], instance, schema, list(path),
+                            f"{instance!r} is less than the minimum of {schema['minimum']!r}")
+        if "maximum" in schema and instance > schema["maximum"]:
+            yield MiniError("maximum", schema["maximum"], instance, schema, list(path),
+                            f"{instance!r} is greater than the maximum of {schema['maximum']!r}")
+    if isinstance(instance, dict):
+        props = schema.get("properties", {})
+        for name in schema.get("required", []):
+            if name not in instance:
+                yield MiniError("required", schema["required"], instance, schema, list(path),
+                                f"{name!r} is a required property")
+        if schema.get("additionalProperties") is False:
+            extras = [k for k in instance if k not in props]
+            if extras:
+                yield MiniError("additionalProperties", False, instance, schema, list(path),
+                                f"Additional properties are not allowed ({', '.join(map(repr, extras))})")
+        for key, sub in props.items():
+            if key in instance:
+                yield from iter_errors(sub, instance[key], path + [key])
+    if isinstance(instance, list) and isinstance(schema.get("items"), dict):
+        for i, el in enumerate(instance):
+            yield from iter_errors(schema["items"], el, path + [i])
+
+
+class MiniValidator:
+    def __init__(self, schema: dict):
+        self.schema = schema
+
+    def iter_errors(self, instance: Any) -> Iterator[MiniError]:
+        return iter_errors(self.schema, instance)
+
+# %%
+# ----------------------------------------------------------------------------- deterministic scorer
+# Inlined verbatim from phantom_args/scorer.py (project repo); covered by the project's tests.
+"""Deterministic scorer: JSON Schema validation only, no LLM judge.
+
+For one (item, model reply) pair it produces a `Score` with
+
+  label   - one primary label (see LABEL_ORDER)
+  flags   - every fault that was found (an answer can have several)
+  phantom_keys - the unknown argument names the model invented, with paths
+  expect_met   - whether the item's `expect` constraints hold (controls and
+                 near-miss items use this to check the *right* parameter was
+                 used with the right value)
+  repurposed   - informational: which of the item's `misuse_params` received a
+                 value. These are parameters the request says nothing about, so
+                 a value there means the unexpressible constraint was forced
+                 into a parameter that means something else (a BCC address in
+                 `cc`). Schema-valid, and never caught by a validator.
+  enum_choice  - enum_pressure items: what happened to the enum parameter:
+                 violated (a value outside the enum), listed (a listed value the
+                 user did not ask for), omitted (the parameter was left out)
+  stuffed      - informational, never a fault: which of the item's `markers`
+                 (words of a constraint the tool cannot express) turned up
+                 inside a string argument, i.e. the model packed the
+                 constraint into a free-text field instead of dropping it
+
+Primary label order (first match wins):
+
+  unparseable       no single JSON tool call could be recovered
+  wrong_tool        the call names a tool other than the target
+  phantom_arg       at least one key not defined in the schema (any depth)
+  out_of_enum       a value outside an enum (or const)
+  wrong_type        a value of the wrong JSON type
+  missing_required  a required parameter is absent
+  other_invalid     any other schema violation (minimum, maxItems, pattern, ...)
+  valid             schema-valid call to the right tool
+"""
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+try:                                    # the real validator when it is installed ...
+    from jsonschema import Draft202012Validator as _Validator
+    VALIDATOR_BACKEND = "jsonschema"
+except ImportError:                     # ... otherwise the built-in subset (same results on this tool library)
+    _Validator = MiniValidator
+    VALIDATOR_BACKEND = "minischema"
+
+LABEL_ORDER = (
+    "unparseable",
+    "declined",          # v1.1, may_decline condition only
+    "wrong_tool",
+    "phantom_arg",
+    "out_of_enum",
+    "wrong_type",
+    "missing_required",
+    "other_invalid",
+    "repurposed",        # v1.1, items with `misuse` detectors only: schema-valid, wrong parameter
+    "valid",
+)
+
+_VALIDATOR_TO_FLAG = {
+    "additionalProperties": "phantom_arg",
+    "unevaluatedProperties": "phantom_arg",
+    "enum": "out_of_enum",
+    "const": "out_of_enum",
+    "type": "wrong_type",
+    "required": "missing_required",
+}
+
+
+@dataclass
+class Score:
+    label: str
+    flags: list[str] = field(default_factory=list)
+    phantom_keys: list[dict] = field(default_factory=list)   # {"key", "path", "value"}
+    enum_violations: list[dict] = field(default_factory=list)  # {"path", "value"}
+    type_violations: list[dict] = field(default_factory=list)  # {"path", "expected"}
+    missing_required: list[str] = field(default_factory=list)
+    other_violations: list[dict] = field(default_factory=list)
+    schema_valid: bool = False
+    expect_met: bool | None = None       # None when the item has no expectations or the call is not checkable
+    expect_failed: list[dict] = field(default_factory=list)
+    correct: bool = False                # schema_valid and right tool and expectations met
+    stuffed: list[str] = field(default_factory=list)   # item markers found inside string arguments
+    repurposed: list[str] = field(default_factory=list)  # parameters that absorbed a constraint they do not mean
+    misuse_fired: list[dict] = field(default_factory=list)  # v1.1: the item's `misuse` detectors that matched
+    declined: bool = False               # v1.1, may_decline condition: the reply was a decline
+    decline_text: str | None = None
+    enum_choice: str | None = None       # enum_pressure items: violated | listed | omitted
+    enum_value: Any = None               # the value the model put in the item's `enum_param`
+    parse_reason: str | None = None
+    parse_notes: list[str] = field(default_factory=list)
+    called_tool: str | None = None
+    arguments: Any = None
+
+    def to_dict(self) -> dict:
+        return dict(self.__dict__)
+
+
+# --------------------------------------------------------------------------
+# schema validation
+# --------------------------------------------------------------------------
+def _path_str(parts) -> str:
+    return ".".join(str(p) for p in parts)
+
+
+def _subschema_properties(schema: dict) -> set[str]:
+    return set((schema or {}).get("properties", {}).keys())
+
+
+def validate_arguments(schema: dict, arguments: dict, validator_cls=None) -> dict:
+    """Validate `arguments` against `schema`; return grouped violations."""
+    validator = (validator_cls or _Validator)(schema)
+    out = {
+        "phantom_keys": [],
+        "enum_violations": [],
+        "type_violations": [],
+        "missing_required": [],
+        "other_violations": [],
+    }
+    for err in sorted(validator.iter_errors(arguments), key=lambda e: list(map(str, e.absolute_path))):
+        kind = _VALIDATOR_TO_FLAG.get(err.validator)
+        path = _path_str(err.absolute_path)
+        if kind == "phantom_arg":
+            known = _subschema_properties(err.schema)
+            extras = [k for k in err.instance.keys() if k not in known] if isinstance(err.instance, dict) else []
+            for key in extras:
+                out["phantom_keys"].append(
+                    {"key": key, "path": path, "value": err.instance[key], "nested": bool(path)}
+                )
+        elif kind == "out_of_enum":
+            out["enum_violations"].append({"path": path, "value": err.instance})
+        elif kind == "wrong_type":
+            out["type_violations"].append({"path": path, "expected": err.validator_value, "value": err.instance})
+        elif kind == "missing_required":
+            known_required = err.validator_value
+            present = err.instance.keys() if isinstance(err.instance, dict) else ()
+            for name in known_required:
+                if name not in present:
+                    full = f"{path}.{name}" if path else name
+                    if full not in out["missing_required"]:
+                        out["missing_required"].append(full)
+        else:
+            out["other_violations"].append({"path": path, "validator": err.validator, "message": err.message[:200]})
+    # de-duplicate and order deterministically, whichever validator produced the errors
+    seen = set()
+    unique = []
+    for p in out["phantom_keys"]:
+        if (p["path"], p["key"]) not in seen:
+            seen.add((p["path"], p["key"]))
+            unique.append(p)
+    out["phantom_keys"] = sorted(unique, key=lambda p: (p["path"], p["key"]))
+    out["missing_required"].sort()
+    return out
+
+
+# --------------------------------------------------------------------------
+# expectations
+# --------------------------------------------------------------------------
+_MISSING = object()
+
+
+def _get_path(obj: Any, path: str) -> Any:
+    cur = obj
+    for part in path.split("."):
+        if isinstance(cur, dict):
+            if part not in cur:
+                return _MISSING
+            cur = cur[part]
+        elif isinstance(cur, list):
+            try:
+                cur = cur[int(part)]
+            except (ValueError, IndexError):
+                return _MISSING
+        else:
+            return _MISSING
+    return cur
+
+
+def _norm(v: Any) -> Any:
+    if isinstance(v, str):
+        return v.strip().casefold()
+    return v
+
+
+def _eq(a: Any, b: Any) -> bool:
+    # bool is not interchangeable with 0/1 here
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool) and a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return float(a) == float(b)
+    return _norm(a) == _norm(b)
+
+
+def check_expectation(arguments: dict, exp: dict) -> bool:
+    """Evaluate one expectation. Supported ops:
+
+    equals        value at path equals `value` (strings case-insensitive, 5 == 5.0)
+    one_of        value at path equals any of `value` (a list)
+    contains      string at path contains `value` (case-insensitive);
+                  if `value` is a list, any of them
+    present       path exists
+    absent        path does not exist
+    nonempty      path exists and is not null, "", [] or {}
+    any_contains  string at path, or any string element of the array at path,
+                  contains `value` (case-insensitive); a list means any of them
+    set_equals    array at path equals `value` as a set (optionally of `project`ed keys)
+    set_contains  array at path contains every element of `value`
+    has_item      array at path contains an object whose keys match every
+                  key/value in `value` (a dict)
+    length        array at path has exactly `value` elements
+    """
+    op = exp["op"]
+    got = _get_path(arguments, exp["path"])
+    want = exp.get("value")
+    if op == "present":
+        return got is not _MISSING
+    if op == "absent":
+        return got is _MISSING
+    if got is _MISSING:
+        return False
+    if op == "nonempty":
+        return got not in (None, "", [], {})
+    if op == "any_contains":
+        wants = want if isinstance(want, list) else [want]
+        hay = [got] if isinstance(got, str) else [g for g in got if isinstance(g, str)] if isinstance(got, list) else []
+        return any(_norm(w) in _norm(h) for h in hay for w in wants)
+    if op == "equals":
+        return _eq(got, want)
+    if op == "one_of":
+        return any(_eq(got, w) for w in want)
+    if op == "contains":
+        if not isinstance(got, str):
+            return False
+        wants = want if isinstance(want, list) else [want]
+        return any(_norm(w) in _norm(got) for w in wants)
+    if op == "has_item":
+        if not isinstance(got, list):
+            return False
+        return any(
+            isinstance(el, dict) and all(k in el and _eq(el[k], v) for k, v in want.items())
+            for el in got
+        )
+    if op == "length":
+        return isinstance(got, list) and len(got) == want
+    if op in ("set_equals", "set_contains"):
+        if not isinstance(got, list):
+            return False
+        proj = exp.get("project")
+        items = []
+        for el in got:
+            if proj is not None:
+                if not isinstance(el, dict) or proj not in el:
+                    return False
+                el = el[proj]
+            items.append(el)
+        covered = all(any(_eq(g, w) for g in items) for w in want)
+        if op == "set_contains":
+            return covered
+        return covered and all(any(_eq(g, w) for w in want) for g in items)
+    raise ValueError(f"unknown expectation op {op!r}")
+
+
+def _strings(value: Any):
+    """Yield every string value (not key) found anywhere inside `value`."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+
+
+def find_markers(arguments: Any, markers: list[str] | None) -> list[str]:
+    """Which markers appear (case-insensitively) inside any string argument."""
+    if not markers:
+        return []
+    haystack = "\n".join(s.casefold() for s in _strings(arguments))
+    return [m for m in markers if m.casefold() in haystack]
+
+
+# --------------------------------------------------------------------------
+# scoring
+# --------------------------------------------------------------------------
+def target_tool(item: dict) -> dict:
+    name = item["target_tool"]
+    for tool in item["tools"]:
+        if tool["name"] == name:
+            return tool
+    raise KeyError(f"item {item.get('id')}: target tool {name!r} not among its tools")
+
+
+def score_call(item: dict, parsed: ParsedCall) -> Score:
+    if parsed.declined:
+        # Only reachable in the may_decline condition. Whether declining is the
+        # right answer is a fixed property of the item (`decline_ok`).
+        return Score(label="declined", flags=["declined"], declined=True, decline_text=parsed.decline_text,
+                     correct=bool(item.get("decline_ok")), parse_reason=parsed.reason,
+                     parse_notes=list(parsed.notes))
+    if not parsed.ok:
+        return Score(
+            label="unparseable",
+            flags=["unparseable"],
+            parse_reason=parsed.reason,
+            parse_notes=list(parsed.notes),
+            called_tool=parsed.name,
+        )
+
+    tool = target_tool(item)
+    flags: list[str] = []
+    score = Score(label="valid", parse_notes=list(parsed.notes), called_tool=parsed.name, arguments=parsed.arguments)
+
+    wrong_tool = parsed.name != tool["name"]
+    if wrong_tool:
+        flags.append("wrong_tool")
+        # Validate against the tool that was actually called when it is one of
+        # the offered tools, so a phantom key on a sibling is still recorded.
+        by_name = {t["name"]: t for t in item["tools"]}
+        schema_tool = by_name.get(parsed.name)
+    else:
+        schema_tool = tool
+
+    if schema_tool is not None:
+        v = validate_arguments(schema_tool["parameters"], parsed.arguments)
+        score.phantom_keys = v["phantom_keys"]
+        score.enum_violations = v["enum_violations"]
+        score.type_violations = v["type_violations"]
+        score.missing_required = v["missing_required"]
+        score.other_violations = v["other_violations"]
+        if v["phantom_keys"]:
+            flags.append("phantom_arg")
+        if v["enum_violations"]:
+            flags.append("out_of_enum")
+        if v["type_violations"]:
+            flags.append("wrong_type")
+        if v["missing_required"]:
+            flags.append("missing_required")
+        if v["other_violations"]:
+            flags.append("other_invalid")
+
+    score.stuffed = find_markers(parsed.arguments, item.get("markers"))
+    if not wrong_tool:
+        score.repurposed = [p for p in item.get("misuse_params") or []
+                            if parsed.arguments.get(p) not in (None, [], {})]
+        enum_param = item.get("enum_param")
+        if enum_param:
+            if enum_param not in parsed.arguments:
+                score.enum_choice = "omitted"
+            else:
+                score.enum_value = parsed.arguments[enum_param]
+                violated = any(v["path"] == enum_param for v in score.enum_violations + score.type_violations)
+                score.enum_choice = "violated" if violated else "listed"
+
+    score.schema_valid = not wrong_tool and not any(
+        f in flags for f in ("phantom_arg", "out_of_enum", "wrong_type", "missing_required", "other_invalid")
+    )
+
+    expectations = item.get("expect") or []
+    if expectations and not wrong_tool:
+        failed = [e for e in expectations if not check_expectation(parsed.arguments, e)]
+        score.expect_failed = failed
+        score.expect_met = not failed
+    elif expectations:
+        score.expect_met = False
+    score.correct = score.schema_valid and (score.expect_met is not False)
+
+    # v1.1 `repurposing` items: each detector describes one specific misuse of a
+    # parameter that exists but means something else. A match is a fault even
+    # though the call is schema-valid. Items without `misuse` are unaffected.
+    detectors = item.get("misuse") or []
+    if detectors and not wrong_tool:
+        fired = [d for d in detectors if check_expectation(parsed.arguments, d)]
+        if fired:
+            score.misuse_fired = fired
+            score.repurposed = sorted({d["path"].split(".")[0] for d in fired} | set(score.repurposed))
+            flags.append("repurposed")
+            score.correct = False
+
+    score.flags = [f for f in LABEL_ORDER if f in flags]
+    score.label = score.flags[0] if score.flags else "valid"
+    return score
+
+
+def score_response(item: dict, text: str | None, condition: str | None = None) -> Score:
+    """Parse + score in one step.
+
+    `condition` matters only for "may_decline", where {"cannot_do": "..."} is
+    read as a decline. For every other condition (and when it is omitted) the
+    reply is parsed and scored exactly as in v1.0.
+    """
+    parsed = parse_tool_call(text, known_tools=[t["name"] for t in item["tools"]],
+                             allow_decline=(condition == "may_decline"))
+    return score_call(item, parsed)
+
+# %%
+# ----------------------------------------------------------------------------- aggregation and report
+# Inlined verbatim from phantom_args/aggregate.py (project repo); covered by the project's tests.
+"""Aggregation: per model, per family, per condition, most-invented names.
+
+Works on the raw result records written by run_local.py (one JSON object per
+line). Scores are always recomputed from the saved reply text, so a change to
+the parser or scorer never requires re-running any model.
+
+Denominators (stated next to every rate):
+  scored  - replies that came back complete (not truncated, no API error)
+  parsed  - scored replies from which one tool call could be recovered
+Phantom and enum rates use `parsed`; control score and parse failures use
+`scored` (an unparseable reply to a control item is not a correct call).
+
+CLI:
+  python -m phantom_args.aggregate results/pilot_raw.jsonl \
+      --items data/items.jsonl --json results/summary.json --md results/pilot_tables.md
+"""
+
+import argparse
+import json
+import math
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Iterable
+
+
+V1_0_FAMILIES = ("conventional", "near_miss", "inexpressible", "enum_pressure", "nested", "control")
+FAMILIES = V1_0_FAMILIES + ("repurposing", "matched_control")          # the last two were added in v1.1
+SCHEMA_FAULTS = ("wrong_tool", "phantom_arg", "out_of_enum", "wrong_type", "missing_required", "other_invalid")
+OUTCOMES = ("repurposed", "declined", "clean_call", "schema_fault", "other_wrong", "unparseable")
+PHANTOM_FAMILIES = ("conventional", "near_miss", "inexpressible", "nested")
+TEMPTATION_FAMILIES = ("conventional", "near_miss", "inexpressible", "enum_pressure", "nested")
+
+
+# --------------------------------------------------------------------------
+# statistics
+# --------------------------------------------------------------------------
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for a proportion."""
+    if n == 0:
+        return (0.0, 1.0)
+    p = k / n
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+def mcnemar_exact(b: int, c: int) -> float:
+    """Two-sided exact McNemar p-value from the two discordant counts."""
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = min(b, c)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / 2 ** n
+    return min(1.0, 2 * tail)
+
+
+def rate(k: int, n: int) -> dict:
+    lo, hi = wilson(k, n)
+    return {"k": k, "n": n, "rate": (k / n) if n else None, "lo": lo, "hi": hi}
+
+
+# --------------------------------------------------------------------------
+# loading
+# --------------------------------------------------------------------------
+def load_items(path: str | Path) -> dict[str, dict]:
+    items = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            it = json.loads(line)
+            items[it["id"]] = it
+    return items
+
+
+def load_results(paths: Iterable[str | Path]) -> list[dict]:
+    """Read result files; the LAST record for a (model, item, condition) wins."""
+    latest: dict[tuple, dict] = {}
+    for path in paths:
+        p = Path(path)
+        if not p.exists():
+            continue
+        with p.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue            # a half-written last line after a crash
+                latest[(rec["model"], rec["item_id"], rec["condition"])] = rec
+    return list(latest.values())
+
+
+def rescore(records: list[dict], items: dict[str, dict]) -> list[dict]:
+    """Attach a fresh `score` to every complete reply; drop records of unknown items."""
+    out = []
+    for rec in records:
+        item = items.get(rec["item_id"])
+        if item is None:
+            continue
+        if rec.get("prompt_sha") and rec["prompt_sha"] != prompt_sha(item, rec["condition"]):
+            continue                    # recorded against an older version of this item
+        rec = dict(rec)
+        rec["family"] = item["family"]
+        rec["core"] = bool(item.get("core"))
+        rec["enum_fallback"] = item.get("enum_fallback")
+        rec["misuse_item"] = bool(item.get("misuse_params"))
+        rec["pattern"] = item.get("pattern")
+        if rec.get("status") == "ok":
+            rec["score"] = score_response(item, rec.get("content"), rec["condition"]).to_dict()
+        else:
+            rec["score"] = None
+        out.append(rec)
+    return out
+
+
+# --------------------------------------------------------------------------
+# cells
+# --------------------------------------------------------------------------
+def cell(records: list[dict]) -> dict:
+    """Counts for one group of records."""
+    n_total = len(records)
+    n_error = sum(r["status"] == "error" for r in records)
+    n_trunc = sum(r["status"] == "truncated" for r in records)
+    scored = [r for r in records if r["status"] == "ok"]
+    parsed = [r for r in scored if r["score"]["label"] != "unparseable"]
+    labels = Counter(r["score"]["label"] for r in scored)
+    return {
+        "n_total": n_total,
+        "n_error": n_error,
+        "n_truncated": n_trunc,
+        "n_scored": len(scored),
+        "n_parsed": len(parsed),
+        "labels": dict(labels),
+        "unparseable": rate(len(scored) - len(parsed), len(scored)),
+        "phantom": rate(sum("phantom_arg" in r["score"]["flags"] for r in parsed), len(parsed)),
+        "out_of_enum": rate(sum("out_of_enum" in r["score"]["flags"] for r in parsed), len(parsed)),
+        "invalid": rate(sum(r["score"]["label"] != "valid" for r in parsed), len(parsed)),
+        "correct": rate(sum(bool(r["score"]["correct"]) for r in scored), len(scored)),
+        "stuffed": rate(sum(bool(r["score"]["stuffed"]) and r["score"]["label"] == "valid" for r in parsed), len(parsed)),
+        "wrong_tool": rate(sum("wrong_tool" in r["score"]["flags"] for r in parsed), len(parsed)),
+        "declined": rate(sum(r["score"]["label"] == "declined" for r in scored), len(scored)),
+        "format_deviation": rate(sum(bool(r["score"]["parse_notes"]) for r in parsed), len(parsed)),
+    }
+
+
+def _by(records, *keys):
+    groups = defaultdict(list)
+    for r in records:
+        groups[tuple(r[k] for k in keys)].append(r)
+    return groups
+
+
+def phantom_key_counts(records: list[dict]) -> Counter:
+    c: Counter = Counter()
+    for r in records:
+        if r["status"] == "ok" and r["score"]["phantom_keys"]:
+            for key in sorted({p["key"].lower() for p in r["score"]["phantom_keys"]}):   # sorted: stable order for ties
+                c[key] += 1
+    return c
+
+
+def paired_effect(records: list[dict], families=PHANTOM_FAMILIES, flag="phantom_arg") -> dict:
+    """Neutral vs instructed on the same items (both replies parsed)."""
+    by_item: dict[str, dict[str, dict]] = defaultdict(dict)
+    for r in records:
+        if r["family"] in families and r["status"] == "ok" and r["score"]["label"] != "unparseable":
+            by_item[r["item_id"]][r["condition"]] = r
+    both = b = c = neither = 0
+    for conds in by_item.values():
+        if "neutral" not in conds or "instructed" not in conds:
+            continue
+        n = flag in conds["neutral"]["score"]["flags"]
+        i = flag in conds["instructed"]["score"]["flags"]
+        if n and i:
+            both += 1
+        elif n:
+            b += 1
+        elif i:
+            c += 1
+        else:
+            neither += 1
+    return {"pairs": both + b + c + neither, "both": both, "fixed_by_instruction": b,
+            "broken_by_instruction": c, "neither": neither, "p_mcnemar": mcnemar_exact(b, c)}
+
+
+def summarize(records: list[dict]) -> dict:
+    models = sorted({r["model"] for r in records})
+    summary: dict = {"models": {}, "families": {}, "pooled": {}, "keys": {}, "usage": {}}
+
+    for model in models:
+        mrecs = [r for r in records if r["model"] == model]
+        entry: dict = {"conditions": {}, "families": {}}
+        for cond in CONDITIONS:
+            crecs = [r for r in mrecs if r["condition"] == cond]
+            if not crecs:
+                continue
+            entry["conditions"][cond] = {
+                "all": cell(crecs),
+                "phantom_families": cell([r for r in crecs if r["family"] in PHANTOM_FAMILIES]),
+                "enum_pressure": cell([r for r in crecs if r["family"] == "enum_pressure"]),
+                "control": cell([r for r in crecs if r["family"] == "control"]),
+                "near_miss": cell([r for r in crecs if r["family"] == "near_miss"]),
+            }
+            for fam in FAMILIES:
+                frecs = [r for r in crecs if r["family"] == fam]
+                if frecs:
+                    entry["families"].setdefault(fam, {})[cond] = cell(frecs)
+        entry["paired_phantom"] = paired_effect(mrecs)
+        entry["paired_enum"] = paired_effect(mrecs, families=("enum_pressure",), flag="out_of_enum")
+        done = [r for r in mrecs if r["status"] in ("ok", "truncated")]
+        entry["usage"] = {
+            "calls": len(done),
+            "prompt_tokens": sum((r.get("usage") or {}).get("prompt_tokens") or 0 for r in done),
+            "completion_tokens": sum((r.get("usage") or {}).get("completion_tokens") or 0 for r in done),
+            "reasoning_tokens": sum((r.get("usage") or {}).get("reasoning_tokens") or 0 for r in done),
+            "calls_with_reasoning": sum(bool((r.get("usage") or {}).get("reasoning_tokens")) or bool(r.get("reasoning_chars")) for r in done),
+            "cost": sum(r.get("cost") or 0.0 for r in done),
+            "items": len({r["item_id"] for r in mrecs}),
+        }
+        summary["models"][model] = entry
+
+    for cond in CONDITIONS:
+        crecs = [r for r in records if r["condition"] == cond]
+        summary["pooled"][cond] = {
+            "all": cell(crecs),
+            "phantom_families": cell([r for r in crecs if r["family"] in PHANTOM_FAMILIES]),
+            "enum_pressure": cell([r for r in crecs if r["family"] == "enum_pressure"]),
+            "control": cell([r for r in crecs if r["family"] == "control"]),
+        }
+        for fam in FAMILIES:
+            summary["families"].setdefault(fam, {})[cond] = cell([r for r in crecs if r["family"] == fam])
+        temptation = [r for r in crecs if r["family"] in TEMPTATION_FAMILIES]
+        counts = phantom_key_counts(temptation)
+        models_per_key: dict[str, set] = defaultdict(set)
+        for r in temptation:
+            if r["status"] == "ok":
+                for p in r["score"]["phantom_keys"]:
+                    models_per_key[p["key"].lower()].add(r["model"])
+        summary["keys"][cond] = [
+            {"key": k, "count": n, "models": len(models_per_key[k])} for k, n in counts.most_common(40)
+        ]
+    summary["paired_phantom_pooled"] = paired_effect_pooled(records)
+    summary["reasoning_split"] = reasoning_split(records)
+    summary["v1_1"] = v1_1_summary(records)
+    summary["unparseable_reasons"] = {
+        cond: dict(Counter(r["score"]["parse_reason"] for r in records
+                           if r["condition"] == cond and r["status"] == "ok" and r["score"]["label"] == "unparseable"))
+        for cond in CONDITIONS}
+    summary["unparseable_by_family"] = dict(Counter(
+        r["family"] for r in records if r["status"] == "ok" and r["score"]["label"] == "unparseable"))
+    summary["item_outcomes"] = item_outcomes(records)
+    pooled_enum = Counter()
+    for conds in summary["item_outcomes"]["enum"].values():
+        for cond, d in conds.items():
+            for choice, n in d["choices"].items():
+                pooled_enum[(cond, d["fallback"], choice)] += n
+    summary["enum_choices_pooled"] = {
+        cond: {fb: {c: pooled_enum[(cond, fb, c)] for c in ("violated", "listed", "omitted", "other") if pooled_enum[(cond, fb, c)]}
+               for fb in ("omit", "nearest")}
+        for cond in CONDITIONS}
+    return summary
+
+
+def _flag_rate(records: list[dict], pred) -> dict:
+    parsed = [r for r in records if r["status"] == "ok" and r["score"]["label"] != "unparseable"]
+    return rate(sum(bool(pred(r["score"])) for r in parsed), len(parsed))
+
+
+def reasons_by_default(mrecs: list[dict]) -> bool:
+    """True if the provider returned any reasoning (tokens or text) for this model."""
+    return any(bool((r.get("usage") or {}).get("reasoning_tokens")) or bool(r.get("reasoning_chars"))
+               for r in mrecs if r["status"] in ("ok", "truncated"))
+
+
+def reasoning_split(records: list[dict]) -> dict:
+    """Pool models by whether they reasoned before answering (provider default).
+
+    An association, not an experiment: the two groups are different models, and
+    the non-reasoning ones are on the whole older. `core` restricts to the items
+    every model answered, so both groups are compared on the same items.
+    """
+    groups: dict[str, list[str]] = {"reasoning": [], "no_reasoning": []}
+    for model in sorted({r["model"] for r in records}):
+        mrecs = [r for r in records if r["model"] == model]
+        groups["reasoning" if reasons_by_default(mrecs) else "no_reasoning"].append(model)
+    out: dict = {"models": groups, "all_items": {}, "core_items": {}}
+    for scope, keep in (("all_items", lambda r: True), ("core_items", lambda r: r["core"])):
+        for g, members in groups.items():
+            for cond in CONDITIONS:
+                recs = [r for r in records if r["model"] in members and r["condition"] == cond and keep(r)]
+                out[scope].setdefault(g, {})[cond] = {
+                    "phantom": cell([r for r in recs if r["family"] in PHANTOM_FAMILIES])["phantom"],
+                    "out_of_enum": cell([r for r in recs if r["family"] == "enum_pressure"])["out_of_enum"],
+                    "control_correct": cell([r for r in recs if r["family"] == "control"])["correct"],
+                    "repurposed": _flag_rate([r for r in recs if r.get("misuse_item")],
+                                             lambda sc: bool(sc["repurposed"]) and sc["schema_valid"]),
+                    "enum_substituted": _flag_rate([r for r in recs if r.get("enum_fallback") == "omit"],
+                                                   lambda sc: sc.get("enum_choice") == "listed"),
+                }
+    return out
+
+
+def item_outcomes(records: list[dict]) -> dict:
+    """Per-item counts of where an unexpressible request went, over models.
+
+    repurposed  - items with `misuse_params`: schema-valid calls that put a
+                  value in a parameter the request gives no value for
+    stuffed     - inexpressible items: schema-valid calls with the constraint's
+                  words inside a string argument
+    enum        - enum_pressure items: violated / listed / omitted, and the
+                  values chosen
+    """
+    out: dict = {"repurposed": {}, "stuffed": {}, "enum": {}}
+    for (iid, cond), recs in sorted(_by(records, "item_id", "condition").items()):
+        parsed = [r for r in recs if r["status"] == "ok" and r["score"]["label"] != "unparseable"]
+        if not parsed:
+            continue
+        fam = parsed[0]["family"]
+        if fam != "repurposing" and any(r["score"].get("repurposed") for r in parsed):
+            k = sum(bool(r["score"]["repurposed"]) and r["score"]["schema_valid"] for r in parsed)
+            out["repurposed"].setdefault(iid, {})[cond] = {
+                **rate(k, len(parsed)),
+                "params": dict(Counter(p for r in parsed for p in r["score"]["repurposed"])),
+                "phantom": sum("phantom_arg" in r["score"]["flags"] for r in parsed),
+            }
+        if fam == "inexpressible":
+            k = sum(bool(r["score"]["stuffed"]) and r["score"]["schema_valid"] for r in parsed)
+            out["stuffed"].setdefault(iid, {})[cond] = {
+                **rate(k, len(parsed)), "phantom": sum("phantom_arg" in r["score"]["flags"] for r in parsed)}
+        if fam == "enum_pressure":
+            choices = Counter(r["score"].get("enum_choice") or "other" for r in parsed)
+            values = Counter(json.dumps(r["score"].get("enum_value"), ensure_ascii=False)
+                             for r in parsed if r["score"].get("enum_choice") in ("violated", "listed"))
+            out["enum"].setdefault(iid, {})[cond] = {
+                "n": len(parsed), "fallback": parsed[0].get("enum_fallback"),
+                "choices": dict(choices), "values": dict(values.most_common())}
+    return out
+
+
+def outcome(rec: dict) -> str:
+    """One of OUTCOMES for a complete reply. Used for the v1.1 families."""
+    sc = rec["score"]
+    if sc["label"] in ("unparseable", "declined", "repurposed"):
+        return sc["label"]       # repurposed = schema-valid; a misuse that also breaks the schema is a schema fault
+    if sc["label"] in SCHEMA_FAULTS:
+        return "schema_fault"
+    return "clean_call" if sc["correct"] else "other_wrong"
+
+
+def outcome_counts(records: list[dict]) -> dict:
+    scored = [r for r in records if r["status"] == "ok"]
+    c = Counter(outcome(r) for r in scored)
+    return {"n": len(scored), **{o: c.get(o, 0) for o in OUTCOMES},
+            "correct": sum(bool(r["score"]["correct"]) for r in scored),
+            # a detector matched, but the call is also schema-invalid (e.g. owner_email: null): a strict tool
+            # rejects it, so it is a schema fault, counted here so that it is not lost
+            "schema_fault_with_misuse": sum(r["score"]["label"] in SCHEMA_FAULTS and bool(r["score"].get("misuse_fired"))
+                                            for r in scored)}
+
+
+def v1_1_summary(records: list[dict]) -> dict:
+    """Everything about the repurposing family, the matched controls and the may_decline condition."""
+    rep = [r for r in records if r["family"] == "repurposing"]
+    ctl = [r for r in records if r["family"] == "matched_control"]
+    out: dict = {"models": {}, "pooled": {}, "patterns": {}, "items": {}, "matched_control": {},
+                 "decline_by_family": {}, "switch": {}, "reasoning": {}}
+    if not rep and not any(r["condition"] == "may_decline" for r in records):
+        return out
+    conds = [c for c in CONDITIONS if any(r["condition"] == c for r in rep + ctl)]
+    out["conditions"] = conds
+    models = sorted({r["model"] for r in rep + ctl})
+    reasoning = {m: reasons_by_default([r for r in records if r["model"] == m]) for m in models}
+    for c in conds:
+        out["pooled"][c] = outcome_counts([r for r in rep if r["condition"] == c])
+        for g, flag in (("reasoning", True), ("no_reasoning", False)):
+            out["reasoning"].setdefault(g, {})[c] = outcome_counts(
+                [r for r in rep if r["condition"] == c and reasoning[r["model"]] is flag])
+        for pat in sorted({r["pattern"] for r in rep if r["pattern"]}):
+            out["patterns"].setdefault(pat, {})[c] = outcome_counts(
+                [r for r in rep if r["condition"] == c and r["pattern"] == pat])
+        for iid in sorted({r["item_id"] for r in rep}):
+            out["items"].setdefault(iid, {})[c] = outcome_counts(
+                [r for r in rep if r["condition"] == c and r["item_id"] == iid])
+    for m in models:
+        out["models"][m] = {"reasoning": reasoning[m],
+                            "repurposing": {c: outcome_counts([r for r in rep if r["model"] == m and r["condition"] == c]) for c in conds},
+                            "matched_control": {c: outcome_counts([r for r in ctl if r["model"] == m and r["condition"] == c]) for c in conds}}
+    for c in conds:
+        out["matched_control"][c] = outcome_counts([r for r in ctl if r["condition"] == c])
+    # how often a decline is used, per family, when it is allowed
+    md = [r for r in records if r["condition"] == "may_decline" and r["status"] == "ok"]
+    for fam in FAMILIES:
+        fr = [r for r in md if r["family"] == fam]
+        if fr:
+            out["decline_by_family"][fam] = {**rate(sum(r["score"]["label"] == "declined" for r in fr), len(fr)),
+                                             "correct": rate(sum(bool(r["score"]["correct"]) for r in fr), len(fr))}
+    # same model, same item: what the must-call outcome turns into when a decline is allowed
+    pairs: dict = defaultdict(dict)
+    for r in rep:
+        if r["status"] == "ok" and r["condition"] in ("neutral", "may_decline"):
+            pairs[(r["model"], r["item_id"])][r["condition"]] = outcome(r)
+    sw = Counter((p["neutral"], p["may_decline"]) for p in pairs.values() if len(p) == 2)
+    out["switch"] = {"pairs": sum(sw.values()), "table": {f"{a} -> {b}": n for (a, b), n in sorted(sw.items(), key=lambda t: -t[1])}}
+    b = sum(n for (a, bb), n in sw.items() if a == "repurposed" and bb != "repurposed")
+    cc = sum(n for (a, bb), n in sw.items() if a != "repurposed" and bb == "repurposed")
+    out["switch"].update({"repurposed_only_when_must_call": b, "repurposed_only_when_may_decline": cc,
+                          "p_mcnemar": mcnemar_exact(b, cc)})
+    return out
+
+
+def paired_effect_pooled(records: list[dict]) -> dict:
+    tot = Counter()
+    for model in sorted({r["model"] for r in records}):
+        pe = paired_effect([r for r in records if r["model"] == model])
+        for k in ("pairs", "both", "fixed_by_instruction", "broken_by_instruction", "neither"):
+            tot[k] += pe[k]
+    d = dict(tot)
+    d["p_mcnemar"] = mcnemar_exact(tot["fixed_by_instruction"], tot["broken_by_instruction"])
+    return d
+
+
+# --------------------------------------------------------------------------
+# markdown
+# --------------------------------------------------------------------------
+def pct(r: dict, digits: int = 1) -> str:
+    if not r["n"]:
+        return "n/a"
+    return f"{100 * r['rate']:.{digits}f}% ({r['k']}/{r['n']})"
+
+
+def pct_ci(r: dict) -> str:
+    if not r["n"]:
+        return "n/a"
+    return f"{100 * r['rate']:.1f}% ({r['k']}/{r['n']}; 95% CI {100 * r['lo']:.0f}–{100 * r['hi']:.0f}%)"
+
+
+def short(model: str) -> str:
+    return model.split("/", 1)[-1]
+
+
+def _oc(d: dict, key: str) -> str:
+    return f"{100 * d[key] / d['n']:.1f}% ({d[key]}/{d['n']})" if d and d["n"] else "n/a"
+
+
+def render_v1_1(v: dict) -> list[str]:
+    """Tables for the repurposing family, its matched controls and the may_decline condition."""
+    if not v.get("models"):
+        return []
+    conds = v["conditions"]
+    names = {"neutral": "must call", "instructed": "must call + instruction", "may_decline": "may decline"}
+    L = ["### v1.1: repurposing, per model\n",
+         "Share of complete replies. Repurposed = schema-valid call that puts the request into a parameter that means "
+         "something else (the item's detector matched). Clean call = valid call without the misuse that gets the "
+         "expressible parts right. Matched controls are requests for which that same parameter is the right one.\n",
+         "| Model | Reasoned | Condition | Repurposed | Declined | Clean call | Schema fault | Unparseable | Matched controls correct | Matched controls declined |",
+         "|---|---|---|---|---|---|---|---|---|---|"]
+    order = sorted(v["models"], key=lambda m: (v["models"][m]["reasoning"], m))
+    for m in order:
+        e = v["models"][m]
+        for c in conds:
+            d, k = e["repurposing"].get(c), e["matched_control"].get(c)
+            if not d or not d["n"]:
+                continue
+            L.append(f"| {short(m)} | {'yes' if e['reasoning'] else 'no'} | {names.get(c, c)} | {_oc(d, 'repurposed')} | {_oc(d, 'declined')} | "
+                     f"{_oc(d, 'clean_call')} | {_oc(d, 'schema_fault')} | {_oc(d, 'unparseable')} | {_oc(k, 'correct')} | {_oc(k, 'declined')} |")
+    L.append("\n### v1.1: repurposing, pooled\n")
+    L.append("| Group | Condition | Repurposed | Declined | Clean call | Schema fault | Other wrong | Unparseable |")
+    L.append("|---|---|---|---|---|---|---|---|")
+    groups = [("all models", v["pooled"])] + [(g.replace("_", " "), v["reasoning"].get(g, {})) for g in ("no_reasoning", "reasoning")]
+    groups += [(f"pattern: {p}", d) for p, d in v["patterns"].items()]
+    for label, by_cond in groups:
+        for c in conds:
+            d = by_cond.get(c)
+            if d and d["n"]:
+                L.append(f"| {label} | {names.get(c, c)} | {_oc(d, 'repurposed')} | {_oc(d, 'declined')} | {_oc(d, 'clean_call')} | "
+                         f"{_oc(d, 'schema_fault')} | {_oc(d, 'other_wrong')} | {_oc(d, 'unparseable')} |")
+    both = {c: v["pooled"][c].get("schema_fault_with_misuse", 0) for c in conds if v["pooled"].get(c)}
+    if any(both.values()):
+        L.append("\nSchema faults in which a detector also matched (counted as schema faults, since a strict tool rejects "
+                 "them): " + "; ".join(f"{names.get(c, c)}: {n}" for c, n in both.items()) + ".")
+    mc = v["matched_control"]
+    L.append("\nMatched controls, all models: " + "; ".join(
+        f"{names.get(c, c)}: correct {_oc(mc[c], 'correct')}, declined {_oc(mc[c], 'declined')}, flagged as repurposed {_oc(mc[c], 'repurposed')}"
+        for c in conds if mc.get(c) and mc[c]["n"]) + ".")
+    sw = v.get("switch") or {}
+    if sw.get("pairs"):
+        L.append(f"\nSame model and item, must call -> may decline ({sw['pairs']} pairs): " +
+                 "; ".join(f"{k}: {n}" for k, n in sw["table"].items()) + ".")
+        L.append(f"Repurposed only when it had to call: {sw['repurposed_only_when_must_call']}. Repurposed only when it could decline: "
+                 f"{sw['repurposed_only_when_may_decline']}. Exact McNemar p "
+                 + (f"= {sw['p_mcnemar']:.4f}." if sw['p_mcnemar'] >= 0.0001 else "< 0.0001."))
+    if v.get("decline_by_family"):
+        L.append("\n### v1.1: how often a decline is used when it is allowed\n")
+        L.append("| Family | Declining is | Declined | Correct |")
+        L.append("|---|---|---|---|")
+        wrong = ("near_miss", "control", "matched_control")
+        for fam, d in v["decline_by_family"].items():
+            L.append(f"| {fam} | {'wrong' if fam in wrong else 'accepted'} | {pct(d)} | {pct(d['correct'])} |")
+    L.append("\n### v1.1: repurposing, per item (models that repurposed / complete replies)\n")
+    L.append("| Item | " + " | ".join(names.get(c, c) for c in conds) + " | Declined when allowed |")
+    L.append("|---|" + "---|" * (len(conds) + 1))
+    for iid, by_cond in v["items"].items():
+        cells = [f"{by_cond[c]['repurposed']}/{by_cond[c]['n']}" if by_cond.get(c) and by_cond[c]["n"] else "n/a" for c in conds]
+        dd = by_cond.get("may_decline")
+        tail = f"{dd['declined']}/{dd['n']}" if dd and dd["n"] else "n/a"
+        L.append(f"| {iid} | " + " | ".join(cells) + f" | {tail} |")
+    L.append("")
+    return L
+
+
+def render_markdown(summary: dict) -> str:
+    L: list[str] = []
+    models = summary["models"]
+
+    def cond(m, c, group):
+        return models[m]["conditions"].get(c, {}).get(group)
+
+    def neutral_phantom(m):
+        g = cond(m, "neutral", "phantom_families")
+        return g["phantom"]["rate"] if g and g["phantom"]["n"] else -1.0
+
+    order = sorted(models, key=lambda m: (-neutral_phantom(m), m))
+
+    L.append("### Per model\n")
+    L.append("Phantom rate = share of parsed replies with at least one argument name the schema does not define, "
+             "over the four phantom families (conventional, near-miss, inexpressible, nested). "
+             "Control score = share of control items answered with a schema-valid call that uses the existing parameter correctly. "
+             "Counts are k/n.\n")
+    L.append("| Model | Items | Phantom, neutral | Phantom, instructed | Paired p | Enum violations, neutral | Enum violations, instructed | Control score, neutral | Control score, instructed | Unparseable (both) | Truncated |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    for m in order:
+        e = models[m]
+        row = [short(m), str(e["usage"]["items"])]
+        for c in BASE_CONDITIONS:
+            g = cond(m, c, "phantom_families")
+            row.append(pct(g["phantom"]) if g else "n/a")
+        pe = e["paired_phantom"]
+        row.append(f"{pe['p_mcnemar']:.3f} ({pe['fixed_by_instruction']} fixed / {pe['broken_by_instruction']} broken)")
+        for c in BASE_CONDITIONS:
+            g = cond(m, c, "enum_pressure")
+            row.append(pct(g["out_of_enum"]) if g else "n/a")
+        for c in BASE_CONDITIONS:
+            g = cond(m, c, "control")
+            row.append(pct(g["correct"]) if g else "n/a")
+        k = sum(cond(m, c, "all")["unparseable"]["k"] for c in BASE_CONDITIONS if cond(m, c, "all"))
+        n = sum(cond(m, c, "all")["unparseable"]["n"] for c in BASE_CONDITIONS if cond(m, c, "all"))
+        row.append(f"{k}/{n}")
+        row.append(str(sum(cond(m, c, "all")["n_truncated"] for c in BASE_CONDITIONS if cond(m, c, "all"))))
+        L.append("| " + " | ".join(row) + " |")
+
+    ur = summary.get("unparseable_reasons") or {}
+    if any(ur.values()):
+        names = {"no_json": "answered in prose, no call", "multiple_calls": "two different calls",
+                 "malformed_json": "broken JSON", "not_a_tool_call": "JSON that is not a call",
+                 "empty": "empty reply", "arguments_not_object": "arguments not an object"}
+        L.append("\nUnparseable replies by reason: " + "; ".join(
+            f"{c}: " + (", ".join(f"{names.get(k, k)} {v}" for k, v in sorted(ur[c].items(), key=lambda t: -t[1])) or "none")
+            for c in CONDITIONS if c in BASE_CONDITIONS or ur.get(c)) + ". By family: " + ", ".join(
+            f"{k} {v}" for k, v in sorted(summary["unparseable_by_family"].items(), key=lambda t: -t[1])) + ".")
+    L.append("\n### Per family, all models pooled\n")
+    L.append("| Family | Target fault | Neutral | Instructed | Any schema violation, neutral | Any schema violation, instructed |")
+    L.append("|---|---|---|---|---|---|")
+    for fam in V1_0_FAMILIES:
+        f = summary["families"][fam]
+        if fam == "control":
+            L.append(f"| control | (correct call) | {pct_ci(f['neutral']['correct'])} | {pct_ci(f['instructed']['correct'])} | "
+                     f"{pct(f['neutral']['invalid'])} | {pct(f['instructed']['invalid'])} |")
+            continue
+        key = "out_of_enum" if fam == "enum_pressure" else "phantom"
+        L.append(f"| {fam} | {key.replace('phantom', 'phantom_arg')} | {pct_ci(f['neutral'][key])} | {pct_ci(f['instructed'][key])} | "
+                 f"{pct(f['neutral']['invalid'])} | {pct(f['instructed']['invalid'])} |")
+
+    L.append("\n### Per family and model, neutral → instructed (target-fault rate, k/n)\n")
+    fams = [f for f in V1_0_FAMILIES if f != "control"]
+    L.append("| Model | " + " | ".join(fams) + " |")
+    L.append("|---|" + "---|" * len(fams))
+    for m in order:
+        row = [short(m)]
+        for fam in fams:
+            key = "out_of_enum" if fam == "enum_pressure" else "phantom"
+            cells = models[m]["families"].get(fam, {})
+            parts = []
+            for c in BASE_CONDITIONS:
+                if c in cells:
+                    r = cells[c][key]
+                    parts.append(f"{r['k']}/{r['n']}")
+                else:
+                    parts.append("n/a")
+            row.append(" → ".join(parts))
+        L.append("| " + " | ".join(row) + " |")
+
+    L.append("\n### Most-invented argument names (temptation items, all models)\n")
+    for c in CONDITIONS:
+        if c in BASE_CONDITIONS or summary["keys"][c]:
+            L.append(f"**{c}**: " + ", ".join(f"`{k['key']}` ×{k['count']} ({k['models']} models)" for k in summary["keys"][c][:25]) + "\n")
+
+    rs = summary.get("reasoning_split")
+    if rs and rs["models"]["reasoning"] and rs["models"]["no_reasoning"]:
+        L.append("### Models that reasoned before answering vs models that did not\n")
+        L.append("Grouped by whether the provider returned any reasoning at its default setting. "
+                 "The groups are different models, so this is an association, not the effect of reasoning. "
+                 "Core items are the 60 that every model answered.\n")
+        L.append(f"- No reasoning ({len(rs['models']['no_reasoning'])}): " + ", ".join(short(m) for m in rs["models"]["no_reasoning"]))
+        L.append(f"- Reasoning ({len(rs['models']['reasoning'])}): " + ", ".join(short(m) for m in rs["models"]["reasoning"]) + "\n")
+        L.append("| Items | Group | Phantom, neutral | Phantom, instructed | Enum violations, neutral | Enum violations, instructed | Control score, neutral |")
+        L.append("|---|---|---|---|---|---|---|")
+        for scope, label in (("all_items", "all answered"), ("core_items", "core 60")):
+            for g, glabel in (("no_reasoning", "no reasoning"), ("reasoning", "reasoning")):
+                d = rs[scope][g]
+                L.append(f"| {label} | {glabel} | {pct_ci(d['neutral']['phantom'])} | {pct_ci(d['instructed']['phantom'])} | "
+                         f"{pct_ci(d['neutral']['out_of_enum'])} | {pct_ci(d['instructed']['out_of_enum'])} | {pct(d['neutral']['control_correct'])} |")
+        L.append("")
+        L.append("Schema-valid ways of getting it wrong, same grouping (all answered items). Repurposed = a value in a parameter "
+                 "that means something else (items with `misuse_params`). Substituted = on enum items where no listed value "
+                 "means what the user asked, a listed value was sent anyway.\n")
+        L.append("| Group | Repurposed, neutral | Repurposed, instructed | Enum substituted, neutral | Enum substituted, instructed |")
+        L.append("|---|---|---|---|---|")
+        for g, glabel in (("no_reasoning", "no reasoning"), ("reasoning", "reasoning")):
+            d = rs["all_items"][g]
+            L.append(f"| {glabel} | {pct_ci(d['neutral']['repurposed'])} | {pct_ci(d['instructed']['repurposed'])} | "
+                     f"{pct_ci(d['neutral']['enum_substituted'])} | {pct_ci(d['instructed']['enum_substituted'])} |")
+        L.append("")
+
+    io = summary.get("item_outcomes") or {}
+    if io.get("repurposed"):
+        L.append("### Schema-valid calls that put the constraint in a parameter meaning something else\n")
+        L.append("Items whose tool has a parameter that can absorb the request but means something different. "
+                 "k/n = models whose call was schema-valid and gave that parameter a value, over models with a parsed reply.\n")
+        L.append("| Item | Parameter | Neutral | Instructed | Phantom instead (neutral) |")
+        L.append("|---|---|---|---|---|")
+        for iid, conds in io["repurposed"].items():
+            params = sorted({p for d in conds.values() for p in d["params"]})
+            cells = [pct(conds[c]) if c in conds else "0" for c in CONDITIONS]
+            ph = conds.get("neutral", {}).get("phantom", 0)
+            L.append(f"| {iid} | `{', '.join(params)}` | {cells[0]} | {cells[1]} | {ph} |")
+        L.append("")
+    if io.get("stuffed"):
+        rows = [(iid, conds) for iid, conds in io["stuffed"].items() if any(d["k"] for d in conds.values())]
+        rows.sort(key=lambda t: -(t[1].get("neutral", {}).get("rate") or 0))
+        L.append("### Inexpressible items: constraint words written into a string argument (schema-valid)\n")
+        L.append("| Item | Neutral | Instructed |")
+        L.append("|---|---|---|")
+        for iid, conds in rows:
+            L.append(f"| {iid} | " + " | ".join(pct(conds[c], 0) if c in conds else "n/a" for c in BASE_CONDITIONS) + " |")
+        L.append("")
+    if io.get("enum"):
+        ep = summary["enum_choices_pooled"]
+        L.append("### Enum-pressure items: what happened to the enum parameter\n")
+        L.append("violated = a value outside the enum; listed = a listed value the user did not name; omitted = parameter left out. "
+                 "Items are split by what a valid call can do: `nearest` (a listed value is a fair stand-in, e.g. high for critical) "
+                 "and `omit` (no listed value means what the user asked, so leaving the parameter out is the faithful valid call).\n")
+        for c in BASE_CONDITIONS:
+            for fb in ("nearest", "omit"):
+                d = ep[c].get(fb) or {}
+                tot = sum(d.values())
+                if tot:
+                    L.append(f"- {c}, `{fb}` items: " + ", ".join(f"{k} {v}/{tot} ({100 * v / tot:.1f}%)" for k, v in d.items()))
+        L.append("")
+        L.append("Neutral condition, values with counts:\n")
+        L.append("| Item | Fallback | n | Violated | Listed | Omitted | Values chosen |")
+        L.append("|---|---|---|---|---|---|---|")
+        for iid, conds in io["enum"].items():
+            d = conds.get("neutral")
+            if not d:
+                continue
+            ch = d["choices"]
+            vals = ", ".join(f"`{v}` ×{n}" for v, n in d["values"].items())
+            L.append(f"| {iid} | {d['fallback']} | {d['n']} | {ch.get('violated', 0)} | {ch.get('listed', 0)} | {ch.get('omitted', 0)} | {vals} |")
+        L.append("")
+
+    L.extend(render_v1_1(summary.get("v1_1") or {}))
+
+    L.append("### Usage\n")
+    L.append("| Model | Calls | Prompt tokens | Completion tokens | Reasoning tokens reported | Calls with reasoning | Cost (USD) |")
+    L.append("|---|---|---|---|---|---|---|")
+    tot = Counter()
+    for m in sorted(models):
+        u = models[m]["usage"]
+        L.append(f"| {short(m)} | {u['calls']} | {u['prompt_tokens']:,} | {u['completion_tokens']:,} | {u['reasoning_tokens']:,} | {u['calls_with_reasoning']} | {u['cost']:.4f} |")
+        for k in ("calls", "prompt_tokens", "completion_tokens", "reasoning_tokens"):
+            tot[k] += u[k]
+        tot["cost"] += u["cost"]
+    L.append(f"| **total** | {tot['calls']} | {tot['prompt_tokens']:,} | {tot['completion_tokens']:,} | {tot['reasoning_tokens']:,} | | {tot['cost']:.4f} |")
+    return "\n".join(L) + "\n"
+
+# %%
+# ----------------------------------------------------------------------------- items
+# The benchmark data (data/items.jsonl, v1.0, 202 items), zlib + base64. If a dataset containing
+# items.jsonl is attached to the notebook it takes precedence, so the data can be updated without touching code.
+ITEMS_B64 = """
+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
+"""
+
+
+def load_benchmark_items() -> dict:
+    attached = sorted(glob.glob("/kaggle/input/**/items.jsonl", recursive=True))   # UNVERIFIED: dataset mount path (CLI docs: /kaggle/input/<dataset-slug>/)
+    if attached:
+        text = Path(attached[0]).read_text(encoding="utf-8")
+        print("items: attached dataset", attached[0])
+    else:
+        text = zlib.decompress(base64.b64decode("".join(ITEMS_B64.split()))).decode("utf-8")
+        print("items: embedded copy")
+    out = {}
+    for line in text.splitlines():
+        if line.strip():
+            it = json.loads(line)
+            out[it["id"]] = it
+    return out
+
+
+ITEMS = load_benchmark_items()
+print(len(ITEMS), "items;", dict(Counter(it["family"] for it in ITEMS.values())))
+
+# %%
+# ============================================================================= KAGGLE ADAPTER
+# Every call into `kaggle_benchmarks` is in this cell. The one exception is the main task's decorator further
+# down, a literal `@kbench.task(...)`: the editor's Benchmark Task panel reads the source and cannot see a wrapper.
+# Checked on Kaggle on 2026-10-02 (kaggle-benchmarks 0.6.1, model google/gemini-3.7-flash): every call below
+# works as written; the two changes that run showed were needed are marked CHANGED.
+#
+#   kb_default_llm()                      the model this task is being run for
+#   kb_get_llm(slug)                      another model by slug
+#   kb_model_name(llm)                    a stable string used as the cache key
+#   kb_prompt(llm, text, chat_name, t, n) ONE isolated request, output capped at n tokens -> (reply, usage dict)
+#   kb_task(name, description, store)     the task decorator
+#   kb_run(task, llm)                     run a task once
+#   kb_map(task, llm, rows, n_jobs)       run a task over rows in parallel (may raise; the caller falls back)
+#   kb_assert_true / kb_assert_fail       assertions shown in the task result
+#   kb_choose(task_name)                  mark the task this notebook publishes
+import kaggle_benchmarks as kbench
+
+
+def kb_default_llm():
+    """ASSUMED (quick_start.md): `kbench.llm` is the model the task runs for (LLM_DEFAULT)."""
+    return kbench.llm
+
+
+def kb_get_llm(slug: str):
+    """ASSUMED (cookbook.md, "Multi-Model Comparison"): `kbench.llms["vendor/model"]`."""
+    return kbench.llms[slug]
+
+
+def kb_model_name(llm) -> str:
+    """ASSUMED: the attribute that holds a model's slug is not documented; try the likely ones."""
+    for attr in ("name", "model", "model_name", "slug", "id"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return os.environ.get("LLM_DEFAULT") or str(llm)
+
+
+def _kb_usage(chat) -> dict:
+    """ASSUMED (user_guide.md, "Token Usage and Cost Tracking"; examples/usage_tracking.py):
+    chat.usage.input_tokens / output_tokens / total_cost_nanodollars, None unless the Kaggle Model Proxy is used."""
+    usage = getattr(chat, "usage", None)
+    get = lambda name: getattr(usage, name, None) if usage is not None else None
+    nano = get("total_cost_nanodollars")
+    if nano is None:
+        parts = [get("input_tokens_cost_nanodollars"), get("output_tokens_cost_nanodollars")]
+        nano = sum(p for p in parts if p is not None) if any(p is not None for p in parts) else None
+    return {"prompt_tokens": get("input_tokens"), "completion_tokens": get("output_tokens"),
+            "cost": (nano / 1e9) if nano is not None else None}
+
+
+def kb_prompt(llm, text: str, chat_name: str, temperature=0, max_tokens=None) -> tuple:
+    """One isolated request. Returns (reply text, {"prompt_tokens", "completion_tokens", "cost"}).
+
+    Verified on Kaggle: `with kbench.chats.new(name) as chat:` opens a fresh conversation; `llm.prompt(text,
+    temperature=...)` returns the reply as a string.
+    CHANGED (2026-10-03): the output cap goes in as `extra_api_params={"max_tokens": N}`, which reaches the OpenAI
+    client's chat.completions.create. Checked on gemini-3.7-flash, claude-haiku-4-5 and gpt-5.4-nano: `max_tokens`
+    and `max_completion_tokens` both cap the reply; `max_output_tokens` raises TypeError; inside `extra_body` it is
+    ignored. An older library without `extra_api_params` falls back to a call without the cap.
+    NOT AVAILABLE: the finish reason. ask() marks a reply truncated when it used the whole cap.
+    """
+    def send():
+        if max_tokens:
+            try:
+                return llm.prompt(text, temperature=temperature, extra_api_params={"max_tokens": max_tokens})
+            except TypeError as exc:
+                if "extra_api_params" not in str(exc):
+                    raise
+        try:
+            return llm.prompt(text, temperature=temperature)
+        except TypeError:
+            return llm.prompt(text)
+
+    try:
+        chat_cm = kbench.chats.new(chat_name)
+    except AttributeError:                      # no chats.new: send without isolation rather than fail
+        reply, usage = send(), {"prompt_tokens": None, "completion_tokens": None, "cost": None}
+    else:
+        with chat_cm as chat:
+            reply = send()
+            usage = _kb_usage(chat)
+    return (reply if isinstance(reply, str) else str(reply)), usage
+
+
+def kb_task(name: str, description: str | None = None, store: bool = True):
+    """Verified: kbench.task(name, *, description, version, store_task, store_run) used as a decorator.
+    `store_task=False` (examples/dataset_evaluation.py) keeps a helper task off the task list."""
+    kwargs = {"name": name}
+    if description:
+        kwargs["description"] = description
+    if not store:
+        kwargs["store_task"] = False
+        kwargs["store_run"] = False         # CHANGED: no run files for the helper (60-200 x 3 files otherwise)
+    try:
+        return kbench.task(**kwargs)
+    except TypeError:
+        kwargs.pop("store_task", None)
+        kwargs.pop("store_run", None)
+        return kbench.task(**kwargs)
+
+
+def kb_run(task, llm):
+    """ASSUMED (quick_start.md): `task.run(llm=...)` returns a run whose `.result` is the task's return value."""
+    return task.run(llm=llm)
+
+
+def kb_map(task, llm, rows: list, n_jobs: int) -> None:
+    """Run `task(llm, **row)` for every row, in parallel.
+    Verified: workers are threads in this process (joblib ThreadingBackend), so ask() fills RECORDS directly.
+    CHANGED: no `kbench.client.enable_cache()`. Its cache key is task name + row index + model, not the row, so
+    a second evaluate in one session (probe then full set, another condition) got the first one's results
+    back without running. ask() already caches by (model, item, condition). Any exception here makes the
+    caller fall back to a plain sequential loop."""
+    import pandas as pd
+    task.evaluate(llm=[llm], evaluation_data=pd.DataFrame(rows), on_failure="continue", max_attempts=2,
+                  retry_delay=5, n_jobs=n_jobs, timeout=300)
+
+
+def kb_assert_true(condition: bool, expectation: str) -> None:
+    """ASSUMED (user_guide.md): `kbench.assertions.assert_true(value, expectation=...)`."""
+    try:
+        kbench.assertions.assert_true(condition, expectation=expectation)
+    except AttributeError:
+        print("assertion", "passed" if condition else "FAILED", "-", expectation)
+
+
+def kb_assert_fail(expectation: str) -> None:
+    try:
+        kbench.assertions.assert_fail(expectation=expectation)
+    except AttributeError:
+        print("assertion FAILED -", expectation)
+
+
+def kb_choose(task_name: str) -> None:
+    """ASSUMED (quick_start.md): the leaderboard takes ONE task per notebook, selected with the cell magic
+    `%choose <task name>`. In the .ipynb this cell is the literal magic; here it is invoked from code."""
+    try:
+        get_ipython().run_line_magic("choose", task_name)
+    except NameError:
+        pass                                    # not running inside IPython
+# ============================================================================= END OF KAGGLE ADAPTER
+
+# %%
+# ----------------------------------------------------------------------------- cache, budget, one call
+FAMILY_ORDER = FAMILIES_ALL = ("conventional", "near_miss", "inexpressible", "enum_pressure", "nested", "control",
+                               "repurposing", "matched_control")
+if CONDITION not in CONDITIONS:
+    raise ValueError(f"CONDITION must be one of {CONDITIONS}")
+if ONLY_FAMILIES:
+    unknown = set(ONLY_FAMILIES) - set(FAMILIES_ALL)
+    if unknown:
+        raise ValueError(f"unknown families {sorted(unknown)}")
+    ITEMS = {iid: it for iid, it in ITEMS.items() if it["family"] in ONLY_FAMILIES}
+_LOCK = threading.Lock()
+CACHE_FILE = Path(CACHE_DIR) / "phantom_records.jsonl"
+RECORDS: dict = {}            # (model, item_id, condition) -> record, same schema as the local runner's results file
+
+
+class BudgetStop(RuntimeError):
+    pass
+
+
+def _load_cache() -> None:
+    """Read every record file we can find: this session's, and any attached as a dataset from an earlier
+    session (attach the previous notebook version's output to resume across days without paying again)."""
+    paths = [str(CACHE_FILE)] + sorted(glob.glob("/kaggle/input/**/phantom_records*.jsonl", recursive=True))
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                item = ITEMS.get(rec.get("item_id"))
+                if item is None or rec.get("status") != "ok" or rec.get("condition") not in CONDITIONS:
+                    continue
+                if rec.get("prompt_sha") != prompt_sha(item, rec["condition"]):
+                    continue                                   # recorded for an older version of the item
+                RECORDS[(rec["model"], rec["item_id"], rec["condition"])] = rec
+    print(f"cache: {len(RECORDS)} replies already on disk")
+
+
+SESSION = {"spent_usd": 0.0, "paid_calls": 0, "calls_without_cost": 0}
+
+
+def ask(llm, item: dict, condition: str) -> dict:
+    """One benchmark call, cached. Never repeats a call whose reply is already on disk."""
+    model = kb_model_name(llm)
+    key = (model, item["id"], condition)
+    with _LOCK:
+        if key in RECORDS:
+            return RECORDS[key]
+        if SESSION["spent_usd"] >= SESSION_BUDGET_USD:
+            raise BudgetStop(f"session budget of ${SESSION_BUDGET_USD:.2f} reached (${SESSION['spent_usd']:.2f} spent)")
+        if SESSION["calls_without_cost"] >= MAX_CALLS_IF_COST_UNKNOWN:
+            raise BudgetStop(f"{MAX_CALLS_IF_COST_UNKNOWN} calls made without any cost information; stopping to be safe")
+    t0 = time.time()
+    reply, usage = kb_prompt(llm, build_prompt(item, condition), f"{item['id']}:{condition}", TEMPERATURE,
+                             MAX_OUTPUT_TOKENS)
+    rec = {"ts": time.time(), "model": model, "item_id": item["id"], "family": item["family"], "condition": condition,
+           "prompt_sha": prompt_sha(item, condition), "status": "ok", "content": reply, "usage": usage,
+           "cost": usage["cost"] or 0.0, "latency_s": round(time.time() - t0, 2), "source": "kaggle",
+           "max_tokens": MAX_OUTPUT_TOKENS,
+           "truncated": bool(MAX_OUTPUT_TOKENS and (usage["completion_tokens"] or 0) >= MAX_OUTPUT_TOKENS)}
+    with _LOCK:
+        RECORDS[key] = rec
+        SESSION["paid_calls"] += 1
+        if usage["cost"] is None:
+            SESSION["calls_without_cost"] += 1
+        else:
+            SESSION["spent_usd"] += usage["cost"]
+        with open(CACHE_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return rec
+
+
+def print_spend(prefix: str = "") -> None:
+    note = "" if not SESSION["calls_without_cost"] else f" ({SESSION['calls_without_cost']} calls reported no cost)"
+    print(f"{prefix}session spend so far: ${SESSION['spent_usd']:.4f} over {SESSION['paid_calls']} paid calls{note}; "
+          f"session budget ${SESSION_BUDGET_USD:.2f}. Account-level figure: run `kaggle benchmarks quota` or see the notebook's quota panel.")
+
+
+_load_cache()
+
+# %%
+# ----------------------------------------------------------------------------- cost estimate BEFORE running
+# Token counts per call measured in the local pilot (24 open-weight models, Nebius, 2026-10-02):
+#   prompt: about 330 tokens.  completion: about 45 tokens without reasoning, 140-690 with reasoning on by default.
+# Fill PRICES with Kaggle's per-million-token prices for the models you plan to run to get a table up front;
+# the task also measures the real cost on a few probe items before it commits to the full item set.
+PRICES_USD_PER_MTOK = {
+    # "vendor/model-slug": (input_price, output_price),
+}
+PROMPT_TOKENS_PER_CALL = 330
+COMPLETION_TOKENS_PER_CALL = {"no reasoning": 45, "light reasoning": 200, "heavy reasoning": 600}
+N_FULL = len(ITEMS)
+N_CORE = sum(bool(it.get("core")) for it in ITEMS.values())
+
+
+def estimate_table() -> None:
+    per_family = dict(Counter(it["family"] for it in ITEMS.values()))
+    print(f"calls per model and condition: full {N_FULL} {per_family}, core {N_CORE} (at most 10 per family)")
+    for slug, (p_in, p_out) in PRICES_USD_PER_MTOK.items():
+        for label, out_tok in COMPLETION_TOKENS_PER_CALL.items():
+            per_call = (PROMPT_TOKENS_PER_CALL * p_in + out_tok * p_out) / 1e6
+            print(f"  {slug:40s} {label:16s} full ${per_call * N_FULL:.2f}  core ${per_call * N_CORE:.2f}   (one condition)")
+    if not PRICES_USD_PER_MTOK:
+        print("  PRICES_USD_PER_MTOK is empty: no up-front table; the probe inside the task decides full vs core.")
+
+
+estimate_table()
+
+# %%
+# ----------------------------------------------------------------------------- the tasks
+def choose_items(model: str, condition: str) -> list:
+    """Items to run for this model: probe first, then the full set or the core subset."""
+    everything = sorted(ITEMS.values(), key=lambda it: it["id"])
+    core = [it for it in everything if it.get("core")]
+    if SUBSET == "full":
+        return everything
+    if SUBSET == "core":
+        return core
+    # auto: project the cost of the full set from what this model's replies have cost so far
+    seen = [r for (m, _, c), r in RECORDS.items() if m == model and r.get("cost")]
+    if not seen:
+        return core                       # no cost information yet (or the proxy reports none): stay small
+    mean = sum(r["cost"] for r in seen) / len(seen)
+    projected = mean * len(everything)
+    choice = everything if projected <= PER_MODEL_BUDGET_USD else core
+    print(f"{model}: ${mean * 1000:.3f} per 1k calls -> full set projected at ${projected:.2f} per condition; "
+          f"running {'FULL' if choice is everything else 'CORE'} ({len(choice)} items)")
+    return choice
+
+
+@kb_task("phantom_args_item", store=False)
+def phantom_item(llm, item_id: str, condition: str) -> dict:
+    """One item: prompt, parse, validate against the tool's JSON Schema."""
+    rec = ask(llm, ITEMS[item_id], condition)
+    score = score_response(ITEMS[item_id], rec["content"], condition)
+    return {"item_id": item_id, "label": score.label, "correct": score.correct}
+
+
+def run_items(llm, items: list, condition: str) -> None:
+    """Fill the cache for these items. Parallel through the library when possible, else a plain loop."""
+    model = kb_model_name(llm)
+    todo = [it for it in items if (model, it["id"], condition) not in RECORDS]
+    if not todo:
+        return
+    if PARALLEL_JOBS > 0:
+        try:
+            kb_map(phantom_item, llm, [{"item_id": it["id"], "condition": condition} for it in todo], PARALLEL_JOBS)
+        except BudgetStop:
+            raise
+        except Exception as exc:                                  # API mismatch: fall back to the plain loop
+            print(f"parallel run failed ({type(exc).__name__}: {str(exc)[:200]}); falling back to a sequential loop")
+        missing = [it for it in todo if (model, it["id"], condition) not in RECORDS]
+        if missing and SESSION["spent_usd"] < SESSION_BUDGET_USD:
+            print(f"{len(missing)} items still unanswered after the parallel pass; retrying them one at a time")
+    for it in todo:                                               # sequential pass: only items still missing
+        if (model, it["id"], condition) in RECORDS:
+            continue
+        try:
+            ask(llm, it, condition)
+        except BudgetStop as stop:
+            print("STOPPED:", stop)
+            break
+        except Exception as exc:
+            print(f"{it['id']}: call failed ({type(exc).__name__}: {str(exc)[:160]}); skipped, will be retried on the next run")
+
+
+def probe_items() -> list:
+    """One core item per family: a few calls that measure the real cost per call for this model."""
+    out = []
+    for fam in FAMILY_ORDER:
+        fam_items = sorted((it for it in ITEMS.values() if it["family"] == fam and it.get("core")), key=lambda it: it["id"])
+        out.extend(fam_items[:1])
+    return out
+
+
+def scored_records(model: str, condition: str | None = None) -> list:
+    recs = [r for (m, _, c), r in RECORDS.items() if m == model and (condition is None or c == condition)]
+    return rescore(recs, ITEMS)
+
+
+# The main task uses the library decorator itself with a literal name, not kb_task or TASK_NAME: the editor's
+# Benchmark Task panel and `kaggle b t push` find the task by reading the source, and see neither a wrapper nor a
+# variable. Keep this literal equal to TASK_NAME (the project's tests check it in every generated notebook).
+@kbench.task(name="phantom_args_may_decline",
+             description="Share of requests answered correctly when the tool cannot do what was asked: a schema-valid call "
+         "that misuses no parameter (in the may_decline condition, a decline where declining is right). JSON Schema "
+         "checks only, no LLM judge.")   # Kaggle rejects a task name or description over 255 characters
+def phantom_args(llm) -> float:
+    """Leaderboard score = share of items answered correctly. Higher is better.
+
+    correct = a schema-valid call to the right tool that meets the item's checks and, on `repurposing` items,
+    does not put the request into a parameter that means something else. In the `may_decline` condition a
+    decline counts as correct on items the tool cannot serve and as wrong on controls."""
+    model = kb_model_name(llm)
+    if SUBSET == "auto":
+        run_items(llm, probe_items(), CONDITION)
+    run_items(llm, choose_items(model, CONDITION), CONDITION)
+    recs = scored_records(model, CONDITION)
+    print_spend(f"[{model}] ")
+    if not recs:
+        kb_assert_fail("At least one item should have been answered.")
+        return 0.0
+    correct = sum(bool(r["score"]["correct"]) for r in recs)
+    print(render_markdown(summarize(scored_records(model))))
+    kb_assert_true(len(recs) >= len({it["family"] for it in ITEMS.values()}),
+                   "The run should cover at least one item per family.")
+    return correct / len(recs)
+
+
+# %%
+# ----------------------------------------------------------------------------- run
+run = kb_run(phantom_args, kb_default_llm())
+run
+
+# %%
+# Optional: more models in this interactive session (does not create leaderboard entries by itself;
+# leaderboard entries come from running the saved task against each model).
+for slug in EXTRA_MODELS:
+    try:
+        kb_run(phantom_args, kb_get_llm(slug))
+    except BudgetStop as stop:
+        print("STOPPED:", stop)
+        break
+    except Exception as exc:
+        print(f"{slug}: {type(exc).__name__}: {str(exc)[:200]}")
+
+# %%
+# ----------------------------------------------------------------------------- report over everything cached
+all_records = rescore(list(RECORDS.values()), ITEMS)
+if all_records:
+    print(render_markdown(summarize(all_records)))
+print_spend()
+print(f"raw replies: {CACHE_FILE} (same format as the local runner; `python -m phantom_args.aggregate` reads it)")
+
+# %%
+# CHOOSE-CELL: the leaderboard takes ONE task per notebook.
+kb_choose(TASK_NAME)
